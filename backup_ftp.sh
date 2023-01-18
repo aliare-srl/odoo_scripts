@@ -1,4 +1,4 @@
-#! /bin/bash
+#!/bin/bash
 
 servidorftp="mochipa.com.ar"
 userftp=backupcliente

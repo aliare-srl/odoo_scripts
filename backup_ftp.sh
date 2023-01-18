@@ -12,9 +12,9 @@ ftpurl="ftp://$userftp:$passftp@$servidorftp"
 #eliminarantiguos="--delete"
 
 lftp -c "set ftp:list-options -a;
-open '$ftpurl'
-lcd $origen
-cd $destion
+open '$ftpurl';
+lcd $origen;
+cd $destion;
 mirror --reverse \
        	$eliminarantiguos \
-		--verbose "
+		--verbose ; "

@@ -11,3 +11,11 @@ Habrá que clonarlos en el servidor y habilitar su ejecución de ser necesario (
 
    Ejemplo: 0 10 * * * se ejecutaría todos los días a las 10:00Hs
 
+   El script debe ejecutarse bajo un usuario con permiso de lectura/escritura sobre los archivos de backup.
+
+Ejemplo completo: Suponemos que el script se encuentra en /home/admin/odoo_scripts/backup_ftp.sh
+`$ crontab -e`
+Se abre el editor de tareas cron, ingresamos ls siguiente línea:
+`0 10 * * * * sudo su -- odoo -c "/home/admin/odoo_scripts/backupftp.sh"`
+Guardamos los cambios. Se ha programado que todos los días a las 10:00HS se ejecute el el script de backup como el usuario odoo
+

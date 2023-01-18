@@ -14,7 +14,7 @@ ftpurl="ftp://$userftp:$passftp@$servidorftp"
 lftp -c "set ftp:list-options -a;
 open '$ftpurl';
 lcd $origen;
-cd $destion;
+cd $destino;
 mirror --reverse \
        	$eliminarantiguos \
 		--verbose ; "

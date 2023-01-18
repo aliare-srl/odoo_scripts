@@ -1,4 +1,6 @@
-# Estos son script para el mantenimiento de una instalación de Odoo
+# Estos son scripts para el mantenimiento de una instalación de Odoo
+
+Habrá que clonarlos en el servidor y habilitar su ejecución de ser necesario (Usar chmod)
 
 ## backup_ftp.sh - Subir backups a nuestro servidor
 

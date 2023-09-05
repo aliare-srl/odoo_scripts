@@ -23,5 +23,5 @@
 # m h  dom mon dow   command
 3 7 * * * /home/admin/odoo_scripts/backup_ftp_full24.sh
 3 19 * * * /home/admin/odoo_scripts/backup_ftp_full24.sh
-# A las 4 hora del server, se elimina los directorios /tmp/tmp* creados por la falla en los backup
-0 4 * * * /usr/bin/find /tmp ! -path /tmp -name tmp* -user odoo -delete 2>/dev/null
+# Elimina los tmp de los backup fallidos
+0 4 * * * /usr/bin/find /tmp -depth -name 'tmp*' \! -path /tmp -exec /usr/bin/rm -r '{}' + >> /var/log/odoo/cron-tmp-del.log 2>/dev/null

@@ -21,7 +21,7 @@
 # For more information see the manual pages of crontab(5) and cron(8)
 # 
 # m h  dom mon dow   command
-3 7 * * * /home/admin/odoo_scripts/backup_ftp_full24.sh
-3 19 * * * /home/admin/odoo_scripts/backup_ftp_full24.sh
+3 7 * * * /home/admin/odoo_scripts/en_uso/backup_ftp_full24.sh
+3 19 * * * /home/admin/odoo_scripts/en_uso/backup_ftp_full24.sh
 # Elimina los tmp de los backup fallidos
 0 4 * * * /usr/bin/find /tmp -depth -name 'tmp*' \! -path /tmp -exec /usr/bin/rm -r '{}' + >> /var/log/odoo/cron-tmp-del.log 2>/dev/null

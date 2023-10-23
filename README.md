@@ -2,6 +2,8 @@
 
 Habrá que clonarlos en el servidor y habilitar su ejecución de ser necesario (Usar chmod)
 
+Se tiene la subcarpeta `en_uso` donde se copiará el script a personalizar dejando el original intacto.
+
 ## backup_ftp.sh - Subir backups a nuestro servidor
 
 1. Tener instalado lftp (sudo apt install lftp)
@@ -20,4 +22,13 @@ Habrá que clonarlos en el servidor y habilitar su ejecución de ser necesario (
 	4.3 Agregamos la programación
 	`0 10 * * * * /home/admin/odoo_scripts/en_uso/backup_ftp_full24.sh`
 	4.4 Guardamos los cambios. Se ha programado que todos los días a las 10:00HS se ejecute el el script de backup como el usuario odoo
+
+## backup_odoo_instance.sh
+
+1. Copiar el archivo `backup_odoo_instance.sh` con un nombre distintivo dentro del subdir en_uso. Ej. cp backup_odoo_instance.sh en_uso/backup_full24_instance.sh
+2. Modificar las variables dentro del script copiado
+3. Programar la ejecución del script en cron (Usar crontab -e)
+   Para establece los valores del cron se puede utilizar el sition [crontab.guru](https://crontab.guru)
+   3.1 Tener en cuenta los horarios ejecución del script de backup_ftp.sh para coordinarlos.
+
 

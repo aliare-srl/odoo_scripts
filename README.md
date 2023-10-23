@@ -31,4 +31,5 @@ Se tiene la subcarpeta `en_uso` donde se copiará el script a personalizar dejan
    Para establece los valores del cron se puede utilizar el sition [crontab.guru](https://crontab.guru)
    3.1 Tener en cuenta los horarios ejecución del script de backup_ftp.sh para coordinarlos.
 
-
+## analizar_server.sh
+   Permite calcular los valores "idóneos" para la configuración de odoo. Ejecutar con el parámetro -h para ver su forma de uso.

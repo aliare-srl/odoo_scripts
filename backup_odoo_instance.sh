@@ -55,9 +55,9 @@ zip_filename="$backup_path/"$db_name"_$(date +%Y_%m_%d__%H_%M_%S).zip"
 # para que zip no guarde el full path creo un symbolic link con el prefijo filestore
 ln -s "$filestore" "$tmp_dir"/filestore
 cd "$tmp_dir"
-$cmd_zip -qr "$zip_filename" ./filestore
-$cmd_zip -qjr "$zip_filename" "$manifest_file"
-$cmd_zip -qTjr "$zip_filename" "$db_dump_file"
+$cmd_zip -b /tmp -qr "$zip_filename" ./filestore
+$cmd_zip -b /tmp -qjr "$zip_filename" "$manifest_file"
+$cmd_zip -b /tmp -qTjr "$zip_filename" "$db_dump_file"
 
 
 # por último borro el directorio temporal

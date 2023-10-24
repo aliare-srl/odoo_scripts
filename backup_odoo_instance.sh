@@ -28,9 +28,10 @@ $cmd_dump --no-owner --file="$db_dump_file" -d "$db_name"
 
 # Crea un manifest.json, ver odoo.service.db.dump
 manifest_file="$tmp_dir"/manifest.json
-odoo_version="ObtenerOdooVersion"
-odoo_version_info="ObtenerOdooVersionInfo"
-odoo_major_version="ObtenerOdooMajorVersion"
+# Estos valores están fijos en odoo.release
+odoo_version="15.0"
+odoo_version_info=[15,0,0,"final",0,""]
+odoo_major_version="15.0"
 pg_version=$($sql_psql -V | sed -r 's/.* ([0-9\.]+) .*/\1/p')
 
 odoo_installed_modules=$($sql_psql -d $db_name -P pager=off \
@@ -40,7 +41,7 @@ odoo_installed_modules=$($sql_psql -d $db_name -P pager=off \
 odoo_installed_modules1="{${odoo_installed_modules}}"
 
 echo "{'odoo_dump':'1','db_name:'$db_name','version':'$odoo_version','version_info':'$odoo_version_info',\
-'major_version':'$odoo_major_version','pg_version':'$pg_version','modules':$odoo_installed_modules}" > $manifest_file
+'major_version':'$odoo_major_version','pg_version':'$pg_version','modules':{$odoo_installed_modules}}" > $manifest_file
 
 # Si no existe backup_path, intenta crearlo
 [ ! -d "$backup_path" ] & mkdir -p "$backup_path";

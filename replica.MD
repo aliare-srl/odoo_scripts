@@ -60,3 +60,23 @@ Nota: primary_conninfo es el string de conexión que usara el cluster de standby
     - `sudo systemctl restart postgresql@<version>-main.service`
 12. Iniciar el cluster de Standby:
     - `sudo systemctl start postgresql@<version>-<nombre_replica>.service`
+    
+
+# Filestore
+
+Odoo guarda archivos en el llamado *filestore* el cual está ubicado según el parámetro *data_dir* del archivo de configuración. Este directorio también debe ser "replicado".
+Por ejemplo "**/var/opt/odoo/data_dir**"
+
+Para ello se deberá configura el acceso remoto sin password del usuario *odoo*
+TODO: Agregar los pasos para generar un par de clave y copiarlas al servidor remoto.
+Mejor hacerlo bajo el usuario que ejecute odoo en el servidor replicado
+
+## Cron
+TODO: Agregar como usar crontab en el usuario de odoo local para correr el siguiente
+comando rsync: /usr/bin/rsync -e 'ssh -i /home/sebastian/.ssh/id_rsa_odoo_odooserver' -az --delete --partial odoo@192.168.0.25:/var/opt/odoo/data_dir /home/sebastian/rsynctest/ 2>&1 | logger -t RSYNC_REPLICA
+- 'ssh -i ..' especifica la llave privada a utilizar para conexión al servidor remoto.
+- odoo@192.168.0.25:/var/opt/odoo/data_dir especifica el servidor remoto del cual copiar los archivos. Tiene el formato <usuario>@<host>:<fullpath>
+- /home/sebastian/rsynctest/ indica el destino de la copia en la máquina local
+- 2>&1 | logger -t RSYNC_REPLICA redirige stdin y stderr al log del sistema con la etiqueta RSYNC_REPLICA
+
+

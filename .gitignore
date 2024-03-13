@@ -1,2 +1,3 @@
+*.swp
 /en_uso/*
 !/en_uso/.gitkeep

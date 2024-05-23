@@ -16,6 +16,7 @@ Debemos entonces replicar el clúster principal o Main a un servidor o clúster 
 ### Configuración Clúster Principal para permitir la replicación:
 
 Como usuario postgres editar los siguientes archivos ubicados en /etc/postgresql/12/main/:
+
 postgresql.conf:
 ```txt
 listen_addresses = ‘*’
@@ -35,29 +36,38 @@ hostssl all        replica_rewind                0.0.0.0/0        md5
 ```
 
 Crear los usuarios *replica_user* y *replica_rewind* con sus respectivos passwords en el cluster principal utilizando psql ejecutandolo como el usuario postgres:
+```bash
 admin@vps1:~$ sudo -u postgres – psql
+```
 ```sql
-postgres=# CREATE USER replica_user WITH REPLICATION PASSWORD ‘st0ngpa$$word’;
-postgres=# CREATE USER replica_rewind WITH PASSWORD ‘st0ngpa$$word2’;
-postgres=# GRANT EXECUTE on FUNCTION pg_catalog.pg_ls_dir(text, boolean, boolean) to replica_rewind;
-postgres=# GRANT EXECUTE on FUNCTION pg_catalog.pg_stat_file(text, boolean) to replica_rewind;
-postgres=# GRANT EXECUTE on FUNCTION pg_catalog.pg_read_binary_file (text) to replica_rewind ;
-postgres=#  GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file (text, bigint, bigint, boolean) to replica_rewind ;
+CREATE USER replica_user WITH REPLICATION PASSWORD ‘st0ngpa$$word’;
+CREATE USER replica_rewind WITH PASSWORD ‘st0ngpa$$word2’;
+GRANT EXECUTE on FUNCTION pg_catalog.pg_ls_dir(text, boolean, boolean) to replica_rewind;
+GRANT EXECUTE on FUNCTION pg_catalog.pg_stat_file(text, boolean) to replica_rewind;
+GRANT EXECUTE on FUNCTION pg_catalog.pg_read_binary_file (text) to replica_rewind ;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file (text, bigint, bigint, boolean) to replica_rewind ;
 ```
 Salir de psql con el comando \q y reiniciar el servicio de postgresql:
+```bash
 admin@vps1:~$ sudo systemctl restart postgresql@12-main.service
-tener
-El usuario replica_user será utilizado para para la replicación propiamente dicha, mientras que el usuario replica_rewind será utilizado para el backup inicial y el fail over llegado el caso.
+```
+El usuario *replica_user* será utilizado para para la replicación propiamente dicha, mientras que el usuario *replica_rewind* será utilizado para el backup inicial y el fail over llegado el caso.
 El puerto de postgresql debe ser accesible desde Internet. Verificar que esto sea así.
 
-###En el Server de secundario:
-Cambiar al usuario postgres agregar al archivo *~/.pgpass* información de conexión al cluster principal para los usuarios *replica_user* y *replica_rewind*. Este archivo debe existir en el home del usuario postgres y tener permisos 0600. De no existir, crearlo y establecer los permisos correctos:
+### Configuración del Server secundario:
+
+Dentro del home del usuario postgres, debe existir el archivo `~/.pgpass. Debe perteneces al usuario postgres y tener permisos 0600. 
+De no existir, crearlo y establecer los permisos correctos:
 ```bash
 postgres@respaldo:~$ touch .pgpass
 postgres@respaldo:~$ chmod 0600 .pgpass
 ```
 
-Dentro de este archivo se debe indicar los datos de conexión con el formato <ip>:<puerto>:<base de datos>:<nombre de usuario>:<password> en cada línea del mismo. Los : separan los campos, el # se utiliza para los comentarios y el * se utiliza como comodín para cualquiera de los campos exceptuando el password.
+### Replicación del cluster de la VPS:
+
+Agregar al archivo `~/.pgpass` la información de conexión al cluster principal para los usuarios `replica_user` y `replica_rewind`. 
+Dentro de este archivo se debe indicar los datos de conexión con el formato `ip:puerto:base de datos:nombre de usuario:password` en cada línea del mismo. 
+Los : separan los campos, el # se utiliza para los comentarios y el * se utiliza como comodín para cualquiera de los campos exceptuando el password.
 
 Por ejemplo:
 ```txt
@@ -65,40 +75,43 @@ Por ejemplo:
 200.58.98.56:5432:*:replica_user:str0ngp@$$word
 200.58.98.56:5432:template1:replica_rewind:str0ngp@$$word2
 ```
-Donde *200.58.98.56* es la IP del clúster principal, *5432* el puerto del mismo y los paswords corresponden a los establecidos al crear los usuarios en el postgres Main.
+Donde `200.58.98.56` es la IP del clúster principal, `5432` el puerto del mismo y los paswords corresponden a los establecidos al crear los usuarios en el postgres Main.
 
-Si ejecutamos *postgres@respaldo:~$ psql -h 200.58.98.56 -U replica_rewind* se conectará al Main usando el puerto 5432, el usuario replica_rewind, la BD template1 y el password str0ngp@$$word2 según indica la segunda línea del archivo ~/.pgpass.
-**Nota**: Se utiliza la BD template1 porque de forma predeterminada postgresql asume que cada usuario tiene una BD con su mismo nombre, lo cual no es cierto para los usuarios que utilizamos para la replicación.
+Si ejecutamos `postgres@respaldo:~$ psql -h 200.58.98.56 -U replica_rewind`, psql se conectará al Main usando el puerto 5432, el usuario `replica_rewind`, la BD `template1` y el password `str0ngp@$$word2` según indica la segunda línea del archivo `~/.pgpass`.
+
+**Nota**: Se utiliza la BD `template1` que siempre existe en postgresql porque de forma predeterminada se asume que cada usuario tiene una BD con su mismo nombre, lo cual no es cierto para los usuarios que utilizamos para la replicación.
 
 Como usuario postgres crear un nuevo cluster de postgresql:
 ```bash
 postgres@respaldo:~/pg_createcluster 12 vps_clientes_1
 ```
-Donde 12 es la versión de postgresql y vps_clientes_1 en nombre del nuevo cluster. El comando lista el data_dir y el puerto del nuevo cluster. En todo momento se puede utilizar el comando pg_lsclusters para obtener esta información.
-Antes de iniciar el nuevo cluster, eliminar el contenido de su data_dir:
+Donde `12` es la versión de postgresql y `vps_clientes_1` el nombre del nuevo cluster. El comando lista el `data_dir` y el `puerto` del nuevo cluster.
+También se se puede utilizar el comando `pg_lsclusters` para obtener esta información.
+El cúster se crea detenido, proceder a eliminar el contenido de su data_dir:
 ```bash
 postgresql@respaldo:~/rm -r /var/lib/postgresql/12/vps_clientes_1/*
 ```
-
-Realizar la copia inicial de datos realizando un backup del cluster principal utilizando *pg_basebackup*:
-```txt
+Realizar la copia inicial de datos realizando un backup del cluster principal utilizando `pg_basebackup`:
+```bash
 postgres@respaldo:~/pg_basebackup -D /var/lib/postgresql/12/vps_odoo_clientes_1/ -PXs -cfast -Svps_odoo_clientes_1 -C -R -Ureplica_user -h200.58.98.56
 ```
 Los parámetros para el pg_basebackup son:
--D se indica el directorio del cluster réplica.
--U se indica el usuario del cluster principal a utilizar, en este caso se usa replica_user que es el mismo que se usará para la replicación y fue configurado en el archivo .pgpass
--h hostname o ip del clúster principal. Utilizar lo configurado en el archivo .pgpass
--PXs muestra el progreso y realiza el streaming de WAL mientras se realiza el backup.
--R IMPORTANTE: Genera el archivo standby.signal y coloca los datos de conexión
+* -D se indica el directorio del cluster réplica.
+* -U se indica el usuario del cluster principal a utilizar, en este caso se usa replica_user que es el mismo que se usará para la replicación y fue configurado en el archivo .pgpass
+* -h hostname o ip del clúster principal. Utilizar lo configurado en el archivo .pgpass
+* -PXs muestra el progreso y realiza el streaming de WAL mientras se realiza el backup.
+* -R IMPORTANTE: Genera el archivo standby.signal y coloca los datos de conexión
 en el archivo postgresql.auto.conf del clúster secundario.
--C indica que se debe crear, en el clúster principal, el replication slot indicado con el parámetro -S
--S indica el nombre del replication slot a utilizar. En el ejemplo es vps_odoo_clientes_1
--cfast indica que se realice un checkpoint lo más pronto posible en él principal. De esta forma el backup iniciará lo más rápido posible.
+* -C indica que se debe crear, en el clúster principal, el replication slot indicado con el parámetro -S
+* -S indica el nombre del replication slot a utilizar. En el ejemplo es vps_odoo_clientes_1
+* -cfast indica que se realice un checkpoint lo más pronto posible en él principal. De esta forma el backup iniciará lo más rápido posible.
+
 Al especificar el host y usuario, los demás datos necesarios para la conexión serán obtenidos del archivo ~/.pgpass de forma automática.
 Una vez finalizado el backup, desde un usuario con permisos de sudo iniciar el cluster réplica:
 ```bash
 odoouser@respaldo:~$ sudo systemctl start vps_odoo_clientes_1.services
 ```
+
 Puntos importantes:
 * Al indicar el host y el usuario para conectarse al postgres principal, los demás datos de conexión se obtienen desde el archivo ~/.pgpass.
 * pg_basebackup crea un slot en el postgres principal con el nombre indicado en el parámetro -S. Este slot asegura que los archivos WAL necesarios para la réplica no sean borrados antes de que hayan sido aplicados correctamente.
@@ -111,7 +124,7 @@ select * from pg_replication_slots;
 ```
 En el caso del replication slot este figurará como activo.
 
-## Replicación del Filestore.
+### Replicación del Filestore.
 
 Para la copia de los archivos del filestore desde el servidor principal al servidor de respaldo, es necesario configurar que el usuario odoorespaldo tenga acceso a los archivos del usuario odoo de la vps a replicar.
 Para ello se configurará el acceso ssh y las llaves pública y privada correspondiente. Estas llaves son simples archivos de texto cuyo contenido es generado criptográficamente y representa la “identidad” de un usuario.

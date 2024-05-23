@@ -1,62 +1,254 @@
-Las partes a personalizar de los comandos y parámetros se encierran entre <>. Reemplazarlos con el mismo valor cada vez que se encuentren estas variables.
-Ejemplo: *ls /var/lib/postgresql/\<version\>/*, si se tratara de la versión 12 se conviertiría a *ls /var/lib/postgresql/12/*
+# Replicación de una instancia de Odoo a un servidor de respaldo.
 
-Usar `sudo -H -u postgresql <comando> <parámetros>` cuando sea necesario
-ejecutar un comando bajo el usuaro postgres Ej `sudo -H -u postgres mkdir /var/lib/postgresql/nuevo_directorio`
-creará el *nuevo_directorio* como el usuario *postgres*
-También puede ser útil cambiarse al usuario postgres con `sudo su - postgres`.
+Una instancia de Odoo se compone de 
+1. La base de datos
+2. El filestore
+Esto significa que para replicar una instancia de Odoo debemos trasladar tanto la BD como el filestore a un servidor secundario. Con ambas copias es posible recrear la instancia original en caso de catástrofe.
 
-Para editar los archivos de configuración se puede usar cualquier editor de texto plano, como vim o nano. En este documento se utiliza mayoritariamente vim.
+Utilizar el mismo “nombre” tanto para el clúster de posgresql como para la carpeta donde se replicarán los archivos de odoo. Por ejemplo vps_clientes_1
 
-# Replica en entre clústeres en un mismo servidor.
+## Replicación de la BD.
 
-En cluster Main:
-1. Crear usuario posgresql para la replicación:
-    - `createuser <usuario_replicacion> --replication -c 1 -p <puerto>`
-2. Editar postgresql.conf: `sudo -H -u postgres vim /etc/postgresql/<version>/main/postgresql.conf`
-    - `wal_level = replica`
-    - `wal_log_hints = on`
-    - `max_wal_senders = 10`
-    - `max_keep_segments = 64`
-    - `archive_mode = on`
-    - `archive_command = 'test ! -f /var/lib/postgresql/archivado_wal/main/%f && cp %p /var/lib/postgresql/archivado_wal/main/%f'`
-    - `hot_standby = on`
-    - `archive_timeout = 120 # para que el retraso sea de hasta 2 minutos`
-Nota : La configuración max_keep_segments se encuentra deprecated aparentemente desde la versión 12 o 13 de postgresql. Es reemplazada por `wal_keep_size`. Donde el valor está en megabytes. Así que si se configura 64 en wal_keep_segments se debe colocar 64 * 16 = 1024 en wal_keep_size.
-Si el servicio no llegara a iniciar por el parámetro wal_keep_segments, cambiarlo por wal_keep_size.
-3. Editar /var/lib/postgresql/<version>/main/pg_hba.conf:
-    - `host replication <usuario_replicacion> trust` #Esto hay que investigar más, en este caso solo sirve para clusteres en el mismo servidor. NO DEBE USARSE EN PRODUCCION. De ser necesario, colocarlo antes de otros permisos.
-4. Crear si es necesario un nuevo cluster. Tener en cuenta que se eliminarán los archivos de este cluster. OJO
-   - `pg_createcluster <version> <nombre_replica>`
-   - Ahora debe existir un nuevo clustor en el puerto siguiente al último cluster creado. Por ejemplo: si solo existe el cluster main en el puerto 5432, esta nueva instancia utilizará el puerto 5433.
-5. Crear el subdirectorio para el archivado wal del cluster main y <nombre_replica>
-   - `sudo -H -u postgres mkdirk /var/lib/postgresql/archivado_wal/main -p`
-   - `sudo -H -u postgres mkdirk /var/lib/postgresql/archivado_wal/<nombre_replica> -p`
-   - Verificar que existan los directorios *archivado_wal*, *main* y *\<nombre_replica\>*
-6. Eliminar los archivos del cluster replica:
-    - `sudo su - postgres`
-    - `rm /var/lib/postgresql/<version>/<nombre_replica> -r` (hacerlo en el cluster de standby, se borra los datos del cluster OJO)
-    - De aquí en adelante se puede seguir usando el usuario postgres.
-8. Copiar el cluster main al cluster de Standby, se utiliza pg_basebackup como usuario postgres (ya se había ejecutado `sudo su - postgres`):
-    - `pg_basebackup -D /var/lib/postgresql/<nombre_secundario> -U <usuario_replicacion> -w -P # -X`
-NOTA: El parámetro-X está comentado, es necesario para versiones de postgresql anteriores a la 10, ahora ya está predeterminado.
-9. Modificar postgresql.conf del cluster standby:
-   - Abrir con un editor de texto, ejemplo `vim /etc/postgresql/<version>/<nombre_replica>/postgresql.conf`
-   - Modificar los siguientes parámetros:
-     - `wal_level = replica`
-     - `wal_log_hints = on`
-     - `archive_mode = on`
-     - `archive_command = 'test ! -f /var/lib/postgresql/archivado_wal/<nombre_replica>/%f && cp %p /var/lib/postgresql/archivado_wal/<nombre_replica>/%f'`
-     - `max_wal_senders = 10`
-     - `wal_keep_segments = 64 # si da error, cambiar por `wal_keep_size = 1024`
-     - `hot_standby = on`
-     - `primary_conninfo = 'user=<usuario_replicacion> passfile=''/var/lib/postgresql/.pgpass'' host=''/var/run/postgresql'' port=5432 sslmode=prefer krbsrvname=postgres target_session_attrs=any'`
-     - `archive_cleanup_command = 'pg_archivecleanup /var/lib/postgresql/pg_log_archive/<nombre_replica> %r'`
-Nota: primary_conninfo es el string de conexión que usara el cluster de standby para conectarse con el cluster main. Ajustarlo según sea necesario [conninfo](https://www.postgresql.org/docs/12/runtime-config-replication.html#GUC-PRIMARY-CONNINFO)
-10. Crear un archivo vacío con el nombre standby.signal en el cluster <nombre_replica>:
-    - `touch /var/lib/postgresql/14/<nombre_replica>/standby.signal`
-    - Desde aquí se puede salir del usuario postgres con `exit`
-11. Reiniciar el cluster main con un usuario con permisos de [sudo](https://es.wikipedia.org/wiki/Sudo):
-    - `sudo systemctl restart postgresql@<version>-main.service`
-12. Iniciar el cluster de Standby:
-    - `sudo systemctl start postgresql@<version>-<nombre_replica>.service`
+Una instancia o cluster de Postgresql contiene todas y cada una de las bases de datos creadas dentro de la misma. En nuestro caso tenemos varios clientes utilizando el mismo cluster de Postgresql, cada uno con su propia base de datos.
+
+Debemos entonces replicar el clúster principal o Main a un servidor o clúster secundario o de stand-by.
+
+### Configuración Clúster Principal para permitir la replicación:
+
+Como usuario postgres editar los siguientes archivos ubicados en /etc/postgresql/12/main/:
+postgresql.conf:
+```txt
+        listen_addresses = ‘*’
+        wal_level = replica
+        full_page_writes = on
+        wal_log_hints = on
+        hot_standby = on        
+```
+pg_hba.conf:
+```txt
+        # Usuarios para la replicación y para pg_rewind
+        # type        database        user        address        method
+        host        replication        replica_user        0.0.0.0/0        md5
+        hostssl replication        replica_user        0.0.0.0/0        md5
+        host        all        replica_rewind                0.0.0.0/0        md5
+        hostssl all        replica_rewind                0.0.0.0/0        md5
+```
+
+Crear los usuarios *replica_user* y *replica_rewind* en el cluster principal utilizando psql ejecutandolo como el usuario postgres:
+admin@vps1:~$ sudo -u postgres – psql
+```sql
+postgres=# CREATE USER replica_user WITH REPLICATION PASSWORD ‘<una clave fuerte>’;
+
+
+postgres=# CREATE USER replica_rewind WITH PASSWORD ‘<una clave fuerte>’;
+postgres=# GRANT EXECUTE on FUNCTION pg_catalog.pg_ls_dir(text, boolean, boolean) to replica_rewind;
+postgres=# GRANT EXECUTE on FUNCTION pg_catalog.pg_stat_file(text, boolean) to replica_rewind;
+postgres=# GRANT EXECUTE on FUNCTION pg_catalog.pg_read_binary_file (text) to replica_rewind ;
+postgres=#  GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file (text, bigint, bigint, boolean) to replica_rewind ;
+```
+Salir de psql con el comando \q y reiniciar el servicio de postgresql:
+admin@vps1:~$ sudo systemctl restart postgresql@12-main.service
+
+
+El usuario replica_user será utilizado para para la replicación propiamente dicha, mientras que el usuario replica_rewind será utilizado para el backup inicial y el fail over llegado el caso.
+
+
+El puerto de postgresql debe ser accesible desde Internet. Verificar que esto sea así.
+
+
+
+
+En el Server de secundario:
+Cambiar al usuario postgres agregar al archivo  ~/.pgpass información de conexión al cluster principal para los usuarios replica_user y replica_rewind. Este archivo debe existir en el home del usuario postgres y tener permisos 0600. De no existir, crearlo y establecer los permisos correctos:
+
+
+postgres@respaldo:~$ touch .pgpass
+postgres@respaldo:~$ chmod 0600 .pgpass
+
+
+Dentro de este archivo se debe indicar los datos de conexión con el formato <ip>:<puerto>:<base de datos>:<nombre de usuario>:<password> en cada línea del mismo. Los : separan los campos, el # se utiliza para los comentarios y el * se utiliza como comodín para cualquiera de los campos exceptuando el password.
+
+
+Por ejemplo:
+# hostname:port:database:username:password
+200.58.98.56:5432:*:replica_user:str0ngp@$$word
+200.58.98.56:5432:template1:replica_rewind:str0ngp@$$word2
+
+
+Donde 200.58.98.56 es la IP del clúster principal y 5432 el puerto del mismo.
+
+
+Si ejecutamos postgres@respaldo:~$ psql -h 200.58.98.56 -U replica_rewind se conectará al Main usando el puerto 5432, el usuario replica_rewind, la BD template1 y el password str0ngp@$$word2 según indica la segunda línea del archivo ~/.pgpass.
+Nota: Se utiliza la BD template1 porque de forma predeterminada postgresql asume que cada usuario tiene una BD con su mismo nombre, lo cual no es cierto para los usuarios que utilizamos para la replicación.
+
+
+Como usuario postgres crear un nuevo cluster de postgresql:
+postgres@respaldo:~/pg_createcluster 12 vps_clientes_1
+Donde 12 es la versión de postgresql y vps_clientes_1 en nombre del nuevo cluster. El comando lista el data_dir y el puerto del nuevo cluster. En todo momento se puede utilizar el comando pg_lsclusters para obtener esta información.
+
+
+Antes de iniciar el nuevo cluster, eliminar el contenido de su data_dir:
+postgresql@respaldo:~/rm -r /var/lib/postgresql/12/vps_clientes_1/*
+
+
+Realizar la copia inicial de datos realizando un backup del cluster principal utilizando pg_basebackup:
+postgres@respaldo:~/pg_basebackup -D /var/lib/postgresql/12/vps_odoo_clientes_1/ -PXs -cfast -Svps_odoo_clientes_1 -C -R -Ureplica_user -h200.58.98.56
+Los parámetros para el pg_basebackup son:
+-D se indica el directorio del cluster réplica.
+-U se indica el usuario del cluster principal a utilizar, en este caso se usa replica_user que es el mismo que se usará para la replicación y fue configurado en el archivo .pgpass
+-h hostname o ip del clúster principal. Utilizar lo configurado en el archivo .pgpass
+-PXs muestra el progreso y realiza el streaming de WAL mientras se realiza el backup.
+-R IMPORTANTE: Genera el archivo standby.signal y coloca los datos de conexión
+en el archivo postgresql.auto.conf del clúster secundario.
+-C indica que se debe crear, en el clúster principal, el replication slot indicado con el parámetro -S
+-S indica el nombre del replication slot a utilizar. En el ejemplo es vps_odoo_clientes_1
+-cfast indica que se realice un checkpoint lo más pronto posible en él principal. De esta forma el backup iniciará lo más rápido posible.
+Al especificar el host y usuario, los demás datos necesarios para la conexión serán obtenidos del archivo ~/.pgpass de forma automática.
+
+
+Una vez finalizado el backup, desde un usuario con permisos de sudo iniciar el cluster réplica:
+odoouser@respaldo:~$ sudo systemctl start vps_odoo_clientes_1.services
+
+
+Puntos importantes:
+* Al indicar el host y el usuario para conectarse al postgres principal, los demás datos de conexión se obtienen desde el archivo ~/.pgpass.
+* pg_basebackup crea un slot en el postgres principal con el nombre indicado en el parámetro -S. Este slot asegura que los archivos WAL necesarios para la réplica no sean borrados antes de que hayan sido aplicados correctamente.
+* pg_basebackup crea un archivo con los datos de conexión de la réplica hacia el main llamado /var/lib/postgresql/12/main/postgresql.auto.conf en el cual se indican el archivo .pgpass y el slot a utilizar.
+
+Para verificar que la replicación está activa se puede consular la misma en el main con las siguientes queries:
+```sql 
+select * from pg_stat_replication;
+select * from pg_replication_slots;
+```
+En el caso del replication slot este figurará como activo.
+
+## Replicación del Filestore.
+
+Para la copia de los archivos del filestore desde el servidor principal al servidor de respaldo, es necesario configurar que el usuario odoorespaldo tenga acceso a los archivos del usuario odoo de la vps a replicar.
+Para ello se configurará el acceso ssh y las llaves pública y privada correspondiente. Estas llaves son simples archivos de texto cuyo contenido es generado criptográficamente y representa la “identidad” de un usuario.
+Estos archivos se guardan de forma predeterminada el el directorio ~/.ssh de cada usuario. El contenido usual de dicho directorio es:
+* id_rsa -> clave privada del usuario. Nunca debe ser compartida y sólo puede ser leída por el usuario al que pertenece.
+* id_rsa.pub -> clave pública. Esta llave es compartida con quienes necesiten confirmar la identidad del usuario. Está asociada a la clave privada. 
+* authorized_keys -> Opcional: contiene las claves públicas de los usuario que están autorizados para acceder a un servidor remoto.
+* config -> Opcional: contiene los parámetros de conexión ssh a distintos servidores remotos para así no tener que escribir/recordar los mismos cada vez que se quiere acceder.
+* En el servidor de respaldo:
+De ser necesario crear el par de claves pùblico/privada para el usuario a utilizar. En nuestro caso odoouser:
+# cambiar al usuario que ejecuta odoo
+odoo@respaldo:~ /sudo su - odoouser
+# generar el par de claves públicas privadas, en este caso se indica 4096 bits de longitud
+# No es conveniente sobreescribir las llaves si ya existieran.
+odoouser@respaldo:~/ssh-keygen -b 4096
+# Copiar la llave pública al servidor remoto en el home de un usuario con clave, en este
+# caso “admin”. El “./” luego de : indica directorio home.
+odoouser@respaldo:~$ scp -P 5253 /opt/odoouser/.ssh/id_rsa.pub admin@200.58.98.56:./
+
+
+# conectarse al servidor remoto (ssh admin@<ip-servidor-remoto>):
+odoouser@respaldo:~$ ssh admin@200.58.98.56
+# cambiarse al usuario que ejecuta odoo
+admin@200.58.98.56:~$ sudo su - odoo
+# si no existiera crear el directorio .ssh en el home del usuario odoo
+odoo@200.58.98.56:~$ mkdir -p ~/.ssh
+# volcar el contenido de la llave pública copiada del respaldo al archivo authorized_keys del usuario odoo:
+odoo@200.58.98.56:~$ cat /home/admin/id_rsa.pub >> ~/.ssh/authorized_keys
+
+
+# verificar la conexión desde el servidor de respaldo:
+`odoouser@respaldo:~$ ssh odoo@200.58.98.56 -p5253
+Para facilitar las posteriores conexiones crear/editar el archivo ~/.ssh/config como el usuario odoo. El formato de este archivo es :
+Host <nombre_host_remoto_1>
+    HostName <ip_1>
+    Port <puerto-ssh-vps_1>
+    User <user-odoo-vps_1>
+Host <nombre_host_remoto_2>
+    HostName <ip_2>
+    Port <puerto-ssh-vps_2>
+    User <user-odoo-vps_2>
+…
+Host <nombre_host_remoto_n>
+    HostName <ip_n>
+    Port <puerto-ssh-vps_n>
+    User <user-odoo-vps_n>
+En nuestro caso llamaremos al nuestro Host vps_clientes_1 con la ip 200.58.98.56, el puerto 5253 y el usuario odoo
+odoo@respaldo:~$ sudo su - odoouser
+odoouser@respaldo:~$ nano ~/.ssh/config
+# Agregamos lo siguiente
+Host vps_clientes_1
+    HostName 200.58.98.56
+    Port 5253
+    User odoo
+Presionamos Ctrl+O para guardar y Ctrl+X para salir.
+Ahora deberíamos poder conectarnos desde odoorespaldo a la vps como el user odoo usando el nombre de Host configurado:
+odoouser@respaldo:~$ ssh vps_clientes_1
+
+
+Asimismo, cualquier comando ejecutado use ssh para conectarse tendrá los parámetros correctos.
+
+
+Estructura de directorio para los archivos replicados de Odoo:
+Dentro del home del usuario odoouser tenemos dos directorios:
+* odoo -> contiene el código fuente de odoo clonado del mismo modo que en el script de instalación.
+* respaldo_filestore -> una carpeta por vps replicada conteniendo:
+   * data_dir -> directorio con la copia “replicada” del filestore
+   * odoo -> enlace a la directorio del código fuente de odoo
+   * odoo.conf -> archivo de configuración para la instancia replicada de odoo. Deberá tener ajustados los paths a los addons y los datos del clúster de postgresql.
+   * odoo_vps_clientes_1.service -> archivo usado para crear el daemon de la réplica de odoo
+   * requirement.txt -> archivo con las dependencias de python instaladas en la vps con pip
+   * sources -> directorio con la copia “replicada” de los módulos disponibles en la vps.
+
+
+Crear una carpeta para la réplica de archivos de la vps, por ejemplo vps-clientes-1:
+odoouser@respaldo:~$ mkdir -p replica_filestore/vps-clientes-1
+Copiar el filestore del odoo de la vps, usando rsync:
+odoouser@respaldo:~$ rsync -azvP vps_clientes_1:/var/opt/odoo/data_dir /opt/odoouser/respaldo_filestore/vps-clientes-1/
+Copiar la carpeta de módulos de odoo:
+odoouser@respaldo:~$rsync -azvPvps_clientes_1:/opt/odoo/sources /opt/odoouser/respaldo_filestore/vps-clientes-1/
+Copiar el archivo odoo.conf del odoo de la vps:
+odoouser@respaldo:~$ scp vps_clientes_1:/etc/odoo.conf .
+Editar el archivo odoo.conf recién copiado para ajustar los path de los addons a la ruta correspondiente dentro de la carpeta replicada. Por ejemplo: /opt/        odoouser/respaldo_filestore/vps-clientes-1/sources
+También configura el puerto del clúster de postgresql correspondiente. Se pueden listar los clústeres existentes con el comando pg_lsclusters
+Crear y configurar el archivo odoo_vps_clientes_1.service:
+odoouser@respaldo:~$ nano respaldo_filestore/vps-clientes-1/odoo_vps_clientes_1.service
+# Agregar el siguiente contenido ajustandolo según corresponda:
+[Unit]
+  Description=Odoo ERP - Aliare SRL - Respaldo VPS_CLIENTES_1
+  Documentation=http://www.odoo.com
+  Requires=postgresql.service
+  After=network.target postgresql.service
+[Service]
+  SyslogIdentifier=odoo15VPS_CLIENTES_1
+  User=odoouser
+  Group=odoouser
+  StandarOuput=journal+console
+  Restart=always
+  RestartSec=3
+  Type=exec
+  User=odoouser
+  ExecStart=/usr/bin/env python3 /opt/odoouser/respaldo_filestore/vps-clientes-1/odoo/odoo-bin -c /opt/odoouser/respaldo_filestore/vps-clientes-1/odoo.conf
+[Install]
+  WantedBy=default.target
+
+
+Programar la copia del filestore y de los sources en el cron de odoouser:
+odouser@respaldo:~$ crontab -e
+# Agregar una línea especificando que el filestore se actualizarán cada 5 minutos
+*/5 * * * * rsync -azv --delete --partial --timeout=15 vps_clientes_1:/var/opt/odoo/data_dir /opt/odoouser/respaldo_filestore/vps-clientes-1/ 2>&1 | logger -et VPS_CLIENTES_1_FILESTORE
+# Agregar una línea especificado que los sources se copiarán una vez cada 12 horas
+* */12 * * * rsync -azv --delete --partial --timeout=15 vps_clientes_1:/opt/odoo/sources /opt/odoouser/respaldo_filestore/vps-clientes-1/ 2>&1 | logger -et VPS_CLIENTES_1_SOURCES
+
+
+Ajustar el path de destino de la copia, así como la etiqueta del logger.
+Importante: al realizar la copia el origen se refiere al directorio de la vps, no al contenido del mismo. Por eso NO se colora una / final “vps_clientes_1:/opt/odoo/sources”. Mientras que el destino de la copia es dentro del directorio “/opt/odoouser/respaldo_filestore/vps-clientes-1/” por lo que SÏ se coloca la barra final.
+
+
+Generar archivo requirement.txt cada 12 horas mediante cron en la VPS:
+odoo@vps_clientes_1:~$ crontab -e
+# agregar una línea especificado la creación del requirement.txt cada 12 horas dentro del home
+# Genera requirement.txt cada 12 horas para ser copiado al server de respaldo
+* */12 * * * /usr/bin/pip freeze > /opt/odoo/requirement.txt
+
+
+Programar la copia del archivo requirement.txt cada 12 horas en el servidor de respaldo:
+odoouser@respaldo:~$ crontab -e
+# Cada 12 horas sincroniza requirement.txt
+* */12 * * * rsync -azv --partial --timeout=15 vps_clientes_1:/opt/odoo/requirement.txt /opt/odoouser/respaldo_filestore/vps-clientes-1/ 2>&1 | logger -et VPS_CLIENTES_1_REQUIREMENT

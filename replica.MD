@@ -83,17 +83,17 @@ Si ejecutamos `postgres@respaldo:~$ psql -h 200.58.98.56 -U replica_rewind`, psq
 
 Como usuario postgres crear un nuevo cluster de postgresql:
 ```bash
-postgres@respaldo:~/pg_createcluster 12 vps_clientes_1
+postgres@respaldo:~$ pg_createcluster 12 vps_clientes_1
 ```
 Donde `12` es la versión de postgresql y `vps_clientes_1` el nombre del nuevo cluster. El comando lista el `data_dir` y el `puerto` del nuevo cluster.
 También se se puede utilizar el comando `pg_lsclusters` para obtener esta información.
 El cúster se crea detenido, proceder a eliminar el contenido de su data_dir:
 ```bash
-postgresql@respaldo:~/rm -r /var/lib/postgresql/12/vps_clientes_1/*
+postgresql@respaldo:~$ rm -r /var/lib/postgresql/12/vps_clientes_1/*
 ```
 Realizar la copia inicial de datos realizando un backup del cluster principal utilizando `pg_basebackup`:
 ```bash
-postgres@respaldo:~/pg_basebackup -D /var/lib/postgresql/12/vps_odoo_clientes_1/ -PXs -cfast -Svps_odoo_clientes_1 -C -R -Ureplica_user -h200.58.98.56
+postgres@respaldo:~$ pg_basebackup -D /var/lib/postgresql/12/vps_odoo_clientes_1/ -PXs -cfast -Svps_odoo_clientes_1 -C -R -Ureplica_user -h200.58.98.56
 ```
 Los parámetros para el pg_basebackup son:
 * -D se indica el directorio del cluster réplica.
@@ -124,25 +124,27 @@ select * from pg_replication_slots;
 ```
 En el caso del replication slot este figurará como activo.
 
-### Replicación del Filestore.
+## Replicación del Filestore.
 
 Para la copia de los archivos del filestore desde el servidor principal al servidor de respaldo, es necesario configurar que el usuario odoorespaldo tenga acceso a los archivos del usuario odoo de la vps a replicar.
-Para ello se configurará el acceso ssh y las llaves pública y privada correspondiente. Estas llaves son simples archivos de texto cuyo contenido es generado criptográficamente y representa la “identidad” de un usuario.
-Estos archivos se guardan de forma predeterminada el el directorio ~/.ssh de cada usuario. El contenido usual de dicho directorio es:
+Para ello se configurará el acceso ssh y las llaves pública y privada correspondientes. Estas llaves son simples archivos de texto cuyo contenido es generado criptográficamente y representa la “identidad” de un usuario.
+Estos archivos se guardan de forma predeterminada el directorio ~/.ssh de cada usuario. El contenido usual de dicho directorio es:
 * id_rsa -> clave privada del usuario. Nunca debe ser compartida y sólo puede ser leída por el usuario al que pertenece.
 * id_rsa.pub -> clave pública. Esta llave es compartida con quienes necesiten confirmar la identidad del usuario. Está asociada a la clave privada. 
 * authorized_keys -> Opcional: contiene las claves públicas de los usuario que están autorizados para acceder a un servidor remoto.
 * config -> Opcional: contiene los parámetros de conexión ssh a distintos servidores remotos para así no tener que escribir/recordar los mismos cada vez que se quiere acceder.
 
-###En el servidor de respaldo:
+### En el servidor de respaldo:
+
 De ser necesario crear el par de claves pùblico/privada para el usuario a utilizar. En nuestro caso odoouser:
-```bash # cambiar al usuario que ejecuta odoo
-odoo@respaldo:~ /sudo su - odoouser
+```bash 
+# cambiar al usuario que ejecuta odoo
+odoo@respaldo:~$ sudo su - odoouser
 # generar el par de claves públicas privadas, en este caso se indica 4096 bits de longitud
-# No es conveniente sobreescribir las llaves si ya existieran.
-odoouser@respaldo:~/ssh-keygen -b 4096
+# No es conveniente sobreescribir las llaves, si ya existieran utilizar las existentes.
+odoouser@respaldo:~$ ssh-keygen -b 4096
 # Copiar la llave pública al servidor remoto en el home de un usuario con clave, en este
-# caso “admin”. El “./” luego de : indica directorio home.
+# caso “admin”. El `./` luego de : indica directorio home del usuario remoto.
 odoouser@respaldo:~$ scp -P 5253 /opt/odoouser/.ssh/id_rsa.pub admin@200.58.98.56:./
 # conectarse al servidor remoto (ssh admin@<ip-servidor-remoto>):
 odoouser@respaldo:~$ ssh admin@200.58.98.56
@@ -152,8 +154,8 @@ admin@200.58.98.56:~$ sudo su - odoo
 odoo@200.58.98.56:~$ mkdir -p ~/.ssh
 # volcar el contenido de la llave pública copiada del respaldo al archivo authorized_keys del usuario odoo:
 odoo@200.58.98.56:~$ cat /home/admin/id_rsa.pub >> ~/.ssh/authorized_keys
-# verificar la conexión desde el servidor de respaldo:
-`odoouser@respaldo:~$ ssh odoo@200.58.98.56 -p5253
+# verificar la conexión desde el **servidor de respaldo**:
+odoouser@respaldo:~$ ssh odoo@200.58.98.56 -p5253
 ```
 
 Para facilitar las posteriores conexiones crear/editar el archivo ~/.ssh/config como el usuario odoo. El formato de este archivo es :
@@ -192,20 +194,24 @@ odoouser@respaldo:~$ ssh vps_clientes_1
 ```
 Asimismo, cualquier comando ejecutado use ssh para conectarse tendrá los parámetros correctos.
 
-###Estructura de directorio para los archivos replicados de Odoo:
+### Estructura de directorio para los archivos replicados de Odoo:
 Dentro del home del usuario odoouser tenemos dos directorios:
 * odoo -> contiene el código fuente de odoo clonado del mismo modo que en el script de instalación.
-* respaldo_filestore -> una carpeta por vps replicada conteniendo:
-   * data_dir -> directorio con la copia “replicada” del filestore
-   * odoo -> enlace a la directorio del código fuente de odoo
+* respaldo_filestore -> contiene una carpeta por vps replicada, dentro de cada una existen lo siguiente:
+   * data_dir -> directorio con la copia “replicada” del filestore.
+   * odoo -> enlace a la directorio del código fuente de odoo.
    * odoo.conf -> archivo de configuración para la instancia replicada de odoo. Deberá tener ajustados los paths a los addons y los datos del clúster de postgresql.
-   * odoo_vps_clientes_1.service -> archivo usado para crear el daemon de la réplica de odoo
-   * requirement.txt -> archivo con las dependencias de python instaladas en la vps con pip
+   * odoo_vps_clientes_1.service -> archivo usado para crear el daemon de la réplica de odoo.
+   * requirement.txt -> archivo con las dependencias de python instaladas en la vps con pip.
    * sources -> directorio con la copia “replicada” de los módulos disponibles en la vps.
 
 Crear una carpeta para la réplica de archivos de la vps, por ejemplo vps-clientes-1:
 ```bash
 odoouser@respaldo:~$ mkdir -p replica_filestore/vps-clientes-1
+```
+Crear un enlace a la carpeta del código fuente de odoo:
+```bash
+odoouser@respaldo:~$ ln -s ~/odoo ~/replica_filestore/vps-clientes-1/
 ```
 Copiar el filestore del odoo de la vps, usando rsync:
 ```bash
@@ -219,8 +225,8 @@ Copiar el archivo odoo.conf del odoo de la vps:
 ```bash
 odoouser@respaldo:~$ scp vps_clientes_1:/etc/odoo.conf .
 ```
-Editar el archivo *odoo.conf* recién copiado para ajustar los path de los addons a la ruta correspondiente dentro de la carpeta replicada. Por ejemplo: */opt/odoouser/respaldo_filestore/vps-clientes-1/sources*
-También configurar el puerto del clúster de postgresql correspondiente. Se pueden listar los clústeres existentes con el comando *pg_lsclusters*.
+Editar el archivo `odoo.conf` recién copiado para ajustar los path de todos y cada uno de los addons a la ruta correspondiente dentro de la carpeta replicada. Por ejemplo: `/opt/odoouser/respaldo_filestore/vps-clientes-1/sources`
+También configurar el puerto del clúster de postgresql correspondiente. Se pueden listar los clústeres existentes con el comando `pg_lsclusters`.
 Crear y configurar el archivo odoo_vps_clientes_1.service:
 ```bash
 odoouser@respaldo:~$ nano respaldo_filestore/vps-clientes-1/odoo_vps_clientes_1.service

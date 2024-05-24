@@ -310,3 +310,14 @@ Verificar en el log que el cluster esté disponible para conexiónes de lectura/
 postgres@respaldo:~$ tail -fn 500 /var/log/postgresql/postgresql-12-vps_clientes_1.log
 ```
 Una ves confirmado la disponibiblidad del clúster, percionar Ctrl+C para salir del listado del log.
+
+
+### Failover de Odoo
+Una ves disponible el clúster posgresql, se procederá a configurar una instancia de Odoo como daemon utilizado el archivo .service correspondiente.
+Crear un link simbólico del archivo *service* a la carpeta de daemos de systemd. Luego se refresca el listado de servicios, se inicia y habilita la instancia de Odoo:
+```bash
+odoo@respaldo:~$ sudo ln -s respaldo_filestore/vps-clientes-1/odoo_vps_clientes_1.service /etc/systemd/system/
+odoo@respaldo:~$ sudo systemctl daemon-reload
+odoo@respaldo:~$ sudo systemctl start odoo_vps_clientes_1.service
+odoo@respaldo:~$ sudo systemctl enable odoo_vps_clientes_1.service
+```

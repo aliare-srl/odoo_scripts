@@ -313,7 +313,62 @@ Una ves confirmado la disponibiblidad del clúster, percionar Ctrl+C para salir 
 
 
 ### Failover de Odoo
+
 Una ves disponible el clúster posgresql, se procederá a configurar una instancia de Odoo como daemon utilizado el archivo .service correspondiente.
+
+#### Verificar Instancia de Odoo:
+Comprobar que odoo pueda ejecutarse sin errores con los archivos disponibles en la carpeta de la instacia replicada. Para ello simplemente ejecutar el comando configurado en el archivo `service` como el usuario `odoouser`, agregándole los parámetros -d<bd_name> --stop-after-init --logfile='': 
+Primero listamos el contenido del archivo service para ver en la configuración ExecStar el comando necesario:
+```bash
+odoo@odoorespaldo:~$ sudo -u odoouser -- cat /opt/odoouser/respaldo_filestore/vps-clientes-1/odoo_vps_clientes_1.service 
+[sudo] password for odoo: 
+[Unit]
+  Description=Odoo ERP - Aliare SRL - Respaldo VPS_CLIENTES_1
+  Documentation=http://www.odoo.com
+  Requires=postgresql.service
+  After=network.target postgresql.service
+[Service]
+  SyslogIdentifier=odoo15VPS_CLIENTES_1
+  User=odoouser
+  Group=odoouser
+  StandarOuput=journal+console
+  Restart=always
+  RestartSec=3
+  Type=exec
+  User=odoouser
+  ExecStart=/usr/bin/env python3 /opt/odoouser/respaldo_filestore/vps-clientes-1/odoo/odoo-bin -c /opt/odoouser/respaldo_filestore/vps-clientes-1/odoo.conf
+[Install]
+  WantedBy=default.target
+```
+Ejecutamos el comando agregándole los parámetros -d<bd_name> y --stop-after-init. El <db_name> debe corresponder a una bd existente en el posgresql promovido.
+```bash 
+odoo@respaldo:~$ sudo -u odoouser -- /usr/bin/env python3 /opt/odoouser/respaldo_filestore/vps-clientes-1/odoo/odoo-bin -c /opt/odoouser/respaldo_filestore/vps-clientes-1/odoo.conf -dfull24 --stop-after-init --logfile=''
+```
+Con esto odoo intentará iniciar sobre la BD indicada, listando su log en pantalla y deteniendose inmediatamente luego de terminar su inicio.
+
+#### Posible problemas de configuración de la Instancia de Odoo:
+
+Puede ser que falten las dependencias de python, usar el archivo requiremente para instalarlas como el usuario odoouser:
+```bash
+odoo@respaldo:~$ sudo su - odoouser
+odoouser@respaldo:~$ cd respaldo_filestore/vps-clientes-1
+odoouser@respaldo:~$ pip3 install -r requirement.txt
+```
+Tambíen podría ser necesario que odoouser no exista en el cluster de postgresql, procesder a crearlo como superuser:
+```bash
+odoo@respaldo:~$ sudo su - postgres
+# listamos los clústeres posgresql para obtener los el puesto necesario
+postgres@respaldo:~$ pg_lsclusters
+postgres@respaldo:~$ createuser odoouser -s
+```
+Otro problema es que el usuario odoouser deba ser owner de las BD. En tal caso reasignar el ownership mediante sql:
+```bash
+postgresql@respaldo:~$ psql -p5435 -c "reassing owned by odoo to odoouser;"
+```
+Otro problema podría ser que no encuentre un módulo, verificar que existe en el subdirectorio sources y que el archivo odoo.conf tenga los paths correctos.
+
+
+#### Creación del servicio de la instancia de Odoo:
 Crear un link simbólico del archivo *service* a la carpeta de daemos de systemd. Luego se refresca el listado de servicios, se inicia y habilita la instancia de Odoo:
 ```bash
 odoo@respaldo:~$ sudo ln -s respaldo_filestore/vps-clientes-1/odoo_vps_clientes_1.service /etc/systemd/system/

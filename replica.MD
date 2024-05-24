@@ -295,6 +295,15 @@ En el servidor de respaldo existen los siguientes usuarios de interés:
 - odoouser -> usuario bajo el cual se encuentran disponibles los archivos de los filestores replicados y del código de odoo. También es quien "ejecuta" una instancia de odoo promovida.
 - postgres -> usuario administrador de los clústeres de postgresql replicados.
 
+### Deshabilitar copia de archidos:
+
+Para preservar los archivos replicados, lo primero a realizar será detener la copia de archivos del filestore de la VPS degradada en el cron del usuario `odoouser`
+```bash
+odoo@respaldo:~$ sudo su - odoouser
+odoouser@respaldo:~$ crontab -e
+```
+Proceder a comentar las tareas de copia de archivos de la VPS correspondiente colocando un `#` delante de cada línea necesaria
+
 ### Failover de Postgresql
 Cambiar al usuario postgres y listar los clústeres para obtener los datos necesarios como la versión, el nombre, el puerto y el data directory:
 ```bash

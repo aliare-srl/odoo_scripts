@@ -286,7 +286,9 @@ odoouser@respaldo:~$ crontab -e
 ```
 ## Failover
 
-En caso de catastrofe en el servidor de una vps quedando esta inaccesible, será necesario hacer disponible la replica de dicah vps realizando el proceso de Failover. Para ello habrá que promover el servidor postgresql standby de la vps correspondiente y utilizar el arvchivo de configuración de servicio correspondiente, por ejemplo `odoo_vps_clientes_1.service` para ejecutar odoo como daemon en el servidor de respaldo.
+En caso de catastrofe en el servidor de una vps quedando esta inaccesible, será necesario hacer disponible la replica de dicha vps realizando el proceso de Failover. 
+
+Para ello habrá que promover el servidor postgresql standby replicado de la vps inaccesible y utilizar el arvchivo de configuración de servicio correspondiente, por ejemplo `odoo_vps_clientes_1.service`, para ejecutar odoo como daemon en el servidor de respaldo.
 
 En el servidor de respaldo existen los siguientes usuarios de interés:
 - odoo -> usuario con permiso de sudo (administrador)
@@ -308,4 +310,3 @@ Verificar en el log que el cluster esté disponible para conexiónes de lectura/
 postgres@respaldo:~$ tail -fn 500 /var/log/postgresql/postgresql-12-vps_clientes_1.log
 ```
 Una ves confirmado la disponibiblidad del clúster, percionar Ctrl+C para salir del listado del log.
-

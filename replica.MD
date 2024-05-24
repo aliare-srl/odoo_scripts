@@ -225,7 +225,7 @@ Copiar el archivo odoo.conf del odoo de la vps:
 ```bash
 odoouser@respaldo:~$ scp vps_clientes_1:/etc/odoo.conf .
 ```
-Editar el archivo `odoo.conf` recién copiado para ajustar los path de todos y cada uno de los addons a la ruta correspondiente dentro de la carpeta replicada. Por ejemplo: `/opt/odoouser/respaldo_filestore/vps-clientes-1/sources`
+Editar el archivo `odoo.conf` recién copiado para ajustar los path de todos y cada uno de los addons a la ruta correspondiente dentro de la carpeta replicada. Por ejemplo: `/opt/odoouser/respaldo_filestore/vps-clientes-1/sources`. También configurar el path al data_dir correspondiente al filestor replicado. Ej `/opt/odoouser/respaldo_filestore/vps-clientes-1/data_dir`.
 También configurar el puerto del clúster de postgresql correspondiente. Se pueden listar los clústeres existentes con el comando `pg_lsclusters`.
 Crear y configurar el archivo odoo_vps_clientes_1.service:
 ```bash
@@ -284,3 +284,28 @@ odoouser@respaldo:~$ crontab -e
 # Cada 12 horas sincroniza requirement.txt
 * */12 * * * rsync -azv --partial --timeout=15 vps_clientes_1:/opt/odoo/requirement.txt /opt/odoouser/respaldo_filestore/vps-clientes-1/ 2>&1 | logger -et VPS_CLIENTES_1_REQUIREMENT
 ```
+## Failover
+
+En caso de catastrofe en el servidor de una vps quedando esta inaccesible, será necesario hacer disponible la replica de dicah vps realizando el proceso de Failover. Para ello habrá que promover el servidor postgresql standby de la vps correspondiente y utilizar el arvchivo de configuración de servicio correspondiente, por ejemplo `odoo_vps_clientes_1.service` para ejecutar odoo como daemon en el servidor de respaldo.
+
+En el servidor de respaldo existen los siguientes usuarios de interés:
+- odoo -> usuario con permiso de sudo (administrador)
+- odoouser -> usuario bajo el cual se encuentran disponibles los archivos de los filestores replicados y del código de odoo. También es quien "ejecuta" una instancia de odoo promovida.
+- postgres -> usuario administrador de los clústeres de postgresql replicados.
+
+### Failover de Postgresql
+Cambiar al usuario postgres y listar los clústeres para obtener los datos necesarios como la versión, el nombre, el puerto y el data directory:
+```bash
+odoo@respaldo:~$ sudo su - postgres
+postgres@respaldo:~$ pg_lsclusters
+```
+Promover el cluster, por ejemplo vps_clientes_1:
+```bash
+postgres@respaldo:~$ pg_ctlcluster 12 vps_clientes_1 promote
+```
+Verificar en el log que el cluster esté disponible para conexiónes de lectura/escritura:
+```bash
+postgres@respaldo:~$ tail -fn 500 /var/log/postgresql/postgresql-12-vps_clientes_1.log
+```
+Una ves confirmado la disponibiblidad del clúster, percionar Ctrl+C para salir del listado del log.
+

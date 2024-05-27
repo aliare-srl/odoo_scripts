@@ -391,3 +391,5 @@ odoo@respaldo:~$ sudo systemctl enable odoo_vps_clientes_1.service
 ### Pasos Finales del Failover:
 
 Se deberá configura un Nginx para que haga diponible la instancia de odoo promovida. También se debrá reapuntar el dominio de la vps degradada para que apunte al servidor de respaldo.
+
+

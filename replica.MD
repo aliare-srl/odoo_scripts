@@ -51,7 +51,7 @@ Salir de psql con el comando \q y reiniciar el servicio de postgresql:
 ```bash
 admin@vps1:~$ sudo systemctl restart postgresql@12-main.service
 ```
-El usuario *replica_user* será utilizado para para la replicación propiamente dicha, mientras que el usuario *replica_rewind* será utilizado para el backup inicial y el fail over llegado el caso.
+El usuario *replica_user* será utilizado para para la replicación propiamente dicha y el backup inicial, mientras que el usuario *replica_rewind* será utilizado para el fail over llegado el caso.
 El puerto de postgresql debe ser accesible desde Internet. Verificar que esto sea así.
 
 ### Configuración del Server secundario:
@@ -318,7 +318,7 @@ Verificar en el log que el cluster esté disponible para conexiónes de lectura/
 ```bash
 postgres@respaldo:~$ tail -fn 500 /var/log/postgresql/postgresql-12-vps_clientes_1.log
 ```
-Una ves confirmado la disponibiblidad del clúster, percionar Ctrl+C para salir del listado del log.
+Una vez confirmado la disponibiblidad del clúster, presionar Ctrl+C para salir del listado del log.
 
 
 ### Failover de Odoo
@@ -329,7 +329,7 @@ Una vez disponible el clúster posgresql, se procederá a configurar una instanc
 
 Comprobar que odoo pueda ejecutarse sin errores con los archivos disponibles en la carpeta de la instacia replicada. Para ello simplemente ejecutar el comando configurado en el archivo `service` como el usuario `odoouser`, agregándole los parámetros -d<bd_name> --stop-after-init --logfile='': 
 
-Primero listamos el contenido del archivo service para ver en la configuración ExecStar el comando necesario:
+Primero listamos el contenido del archivo service para ver en la configuración ExecStart el comando necesario:
 ```bash
 odoo@odoorespaldo:~$ sudo -u odoouser -- cat /opt/odoouser/respaldo_filestore/vps-clientes-1/odoo_vps_clientes_1.service 
 [sudo] password for odoo: 
@@ -368,7 +368,7 @@ odoouser@respaldo:~$ pip3 install -r requirement.txt
 Tambíen podría ser que odoouser no exista como usuario en el cluster de postgresql, procesder a crearlo como superuser:
 ```bash
 odoo@respaldo:~$ sudo su - postgres
-# listamos los clústeres posgresql para obtener los el puesto necesario
+# listamos los clústeres posgresql para obtener el puerto necesario
 postgres@respaldo:~$ pg_lsclusters
 postgres@respaldo:~$ createuser odoouser -s
 ```
@@ -393,3 +393,137 @@ odoo@respaldo:~$ sudo systemctl enable odoo_vps_clientes_1.service
 Se deberá configura un Nginx para que haga diponible la instancia de odoo promovida. También se debrá reapuntar el dominio de la vps degradada para que apunte al servidor de respaldo.
 
 
+## Failback
+
+Una vez recuperado el VPS orignal, se procederá a restablecer los servidores a su función original. Este proceso se denomina Failback.
+
+### Failback de Odoo
+
+Detener el servicio de Odoo en el servidor original:
+```bash
+admin@vps1:~$ sudo systemctl stop odoo.service
+```
+
+Copiar el sincronisar el filestore desde el servidor de respaldo al servidor original:
+```bash
+odoo@respaldo:~$ sudo su - odoouser
+odoouser@respaldo:~$ rsync -azv --delete -P /opt/odoouser/respaldo_filestore/vps-clientes-1/ vps_clientes_1:/var/opt/odoo/data_dir
+```
+Una vez finalizada la copia, proceder a descomentar las tarea de sincronización desde la vps al respaldo en el crontab
+```bash
+odoouser@respaldo:~$ crontab -e
+```
+Dentro del crontab proceder a descomentar la copia del directorio `datadir` del filestore, del directorio `sources` y del archivo `requirement.txt` de la VPS restablecida.
+
+### Failback del clúster posgresql
+
+Para el failback del clúster de posgresql se procederá a configurar el clúster de la vps original como stand-by del clúster de respaldo. Esto es para que los datos generados en el clúster de respaldo sean replicados al clúster original.
+
+#### Configuración del clúster de respaldo como primario del clúster origial
+
+Asegurar la existencia de los usuarios `replica_user` y `replica_rewind` con sus respectivas passwords y habilitar su acceso al clúster de respaldo en el archivo `pg_hba.conf` correspondiente. Ver la sección [Configuración Clúster Principal para permitir la replicación](configuración-clúster-principal-para-permitir-la-replicación)
+
+El puerto del clúster de respaldo también debe ser accesible desde internet.
+
+Como el usuario postgres, proceder a crear el slot de replicación a utilizar, por ejemplo `vps1`:
+```bash
+# suponemos que el puerto del clúster de respaldo sea el 5435
+odoo@respaldo:~$ sudo -u postgresql -- psql -p5435 -c "select * from pg_create_physical_replication_slot('vps1');"
+```
+
+#### Configuración del clúster original como standby del clúster de respaldo.
+
+Para restablecer el servidor original como principal en la réplica, basicamente habrá que convertirlo en standby del clúster de respaldo, pero sin un backup inicial. Para lo cual el clúster de respaldo deberá estar comfigurado como principal.
+
+De esta forma los datos generados durante el fallo serán replicados al clúster original antes de proceder a promoverlo. Ver la sección [Replicación del cluster de la VPS](replicación-del-cluster-de-la-vps)
+
+#### Creación del slot de replicación en el clúster de respaldo.
+
+Primero, en el clúster de respaldo, proceder a crear, en nuestro ejemplo `vps1`:
+```bash
+odoo@respaldo:~$ sudo -iu postgresql -- psql -p<puerto> -c "select * from pg_create_physical_slot('vps1');"
+```
+Si el slot ya existiera, el comando informará mediante un error pero no representa un problema.
+
+#### Configurar el clúster principal como standby del clúster de respaldo.
+
+Nos conectamos al servidor orginal y procedemos a detener el servicio del posgresql en el clúster original:
+```bash
+admin@vps1:~$ sudo systemctl stop postgresql@12-main.service
+```
+Verificar que exista la configuración de conexión al clúster de respaldo en el archivo `/var/lib/postgresql/.pgpass`, ajustando los valores a los que correspondan.
+```txt
+<ip_respaldo>:<puerto_respaldo>:replication:replica_user:str0ngpa$$word
+<ip_respaldo>:<puerto_respado>:template1:replica_rewind:stor0ngpa$$word2
+```
+Configurar en el archivo `/var/lib/postgresql/12/main/postgresql.auto.conf` el conninfo y el nombre del slot de replicación ajustando los demás valores que correspondan.
+```txt
+...
+primary_conninfo = 'user=replica_user passfile=''/var/lib/postgresql/.pgpass'' host=<ip_respaldo> port=<puerto_respaldo> sslmode=prefer sslcompression=0 gssencmode=prefer krbsrvname=postgres target_session_attrs=any'
+primary_slot_name = 'vps1'
+```
+Estos usuario deben existir en el clúster de respaldo con un password fuerte y conocido.
+
+Proceder a iniciar el clúster y verificar el en el log correspondiende si pudo ser iniciado sin problemas y que se haya terminado de sincronizar con el clúster de respaldo:
+```bash
+admin@vps1:~$ sudo systemctl start postgresql@12-main.service
+admin@vps1:~$ sudo tail -fn 200 /var/log/postgresql/postgresql-12-main.log
+```
+El log debe indicar que el posgresql se inicio, que pudo cambiar al timeline correspondiente y que está listo para conexiones de solo lectura. De igual modo si al intentar iniciar no pudo replicarse, dará error.
+
+Puede ser que en este punto, hubieran algunas modificacionesn clúster original por lo que la replicación no podrá realizarse debido a las diferencias existentes.
+En tal caso, se procederá a `deshacer` los cambios en el clúster original hasta el pundo en el que difirió del clúster de respaldo utilizando la herramienta `pg_rewind`:
+```bash
+admin@vps1:~$ sudo su - postgres
+postgres@vps1~$ /usr/lib/postgresql/12/bin/pg_rewind -D /var/lib/postgresql/12/main --source-server="host=<ip_respaldo> port=<puerto_respaldo> user=replica_rewind" -P
+```
+Una vez que pg_rewind haya finalizado, el clúster debería poder iniciar y realizar la sincronización sin problemas. Se pueden verificar en el log que la replicación fue exitosa o bien usando las vistas `pg_stat_replication` y `pg_replication_slots^ en el clúster principal o bien la vista `pg_stat_wal_receiver` en el standby. Por ejemplo:
+```sql
+postgres=# \x
+postgres=# select * from pg_stat_replication;
+postgres=# select * from pg_replication_slots;
+postgres=# select * from pg_stat_wal_receiver;
+```
+
+Finalmente, hay que promover el clúster original ya sincronizado.
+Primero, detenemos el clúster de respaldo
+```bash
+odoo@respaldo:~$ sudo systemctl stop postgresql@12-vps_clientes_1.service
+```
+Y luego promovemos el clúster
+```bash
+admin@vps1:~$ sudo -iu postgresql-- pg_ctlclusters 12 main promote
+```
+Para volver a configurar el clúster de respaldo como standby de clúster original siguiendo los pasos necesarios ya descriptos en secciones anteriores.
+
+Por último, no olvidar de eliminar el replication slot del clúster de respaldo. Un replication slot "*olvidado*" podría causar que se retengan archivos del WAL de forma innecesario pudiendo incluso llegar a llenar el disco. Por ello es conveniente crearlos cuando sean necesarios y eliminarlos cuando ya no se utilice.
+```sql
+postgres=# select * from pg_replication_slots; // obtenemos el nombre del replication slot a eliminar, generalmente habrá sólo uno.
+postgres=# select * from pg_drop_replication_slot('vps1');
+```
+
+Llegado el caso de que no sea posible configurar el clúster original como standby del clúster de respaldo, sólo quedará la opción de realizar un backup del clúster de respaldo y restaurarlo al clúster principal. Ver en la sección [Replicación del cluster de la VPS](replicación-del-cluster-de-la-vps) como utilizar pg_basebackup realizar el backup y restaurarlo sobre el clúster original.
+
+### Failback del filestore de Odoo.
+Para sincronizar el filestore del Odoo de respaldo sobre el Odoo original, simplemente utilzar rsync para replicar los cambios.
+```bash
+odoo@respaldo:~$ sudo su - odoouser
+odoouser@respaldo:~$ rsync -azvP --delete /opt/odoouser/respaldo_filestore/vps-clientes-1/data_dir vps_clientes_1:/var/opt/odoo/
+```
+Una vez finalizada la copia de archivos, proceder a rehabilitar las tareas del cron relacionadas a la vps en el servidor. Para ello, proceder a descomentar las líneas necesarias en el crontab, eliminado el `#` en cada una de las líneas correspondientes.
+```bash
+odoo@respaldo:~$ sudo su - odoouser
+odoouser@respaldo:~$ crontab -e
+```
+Por último, deshabilitar la instancia de odoo del servidor de respaldo:
+```bash
+odoo@respaldo:~$ sudo systemctl stop odoo_vps_clientes_1.service
+odoo@respaldo:~$ sudo systemctl disenable odoo_vps_clientes_1.service
+odoo@respaldo:~$ sudo systemctl daemon-reload
+odoo@respaldo:~$ sudo rm /etc/systemd/system/odoo_vps_clientes_1.service
+```
+Tener en cuenta que los nombres son los que se habían utilizados al configurar la replicación.
+
+## Pasos finales
+
+En este punto luego de verificar que el correcto funcionamiento de la Instancia de odoo en la VPS original, se procederá a reestablecer el dominio en el servicio de DNS correspondiente.

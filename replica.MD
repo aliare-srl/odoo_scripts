@@ -399,21 +399,34 @@ Una vez recuperado el VPS orignal, se procederá a restablecer los servidores a 
 
 ### Failback de Odoo
 
-Detener el servicio de Odoo en el servidor original:
+Para evitar que se modifique involuntariamente el contenido del filestore o de las BD, detener el servicio de Odoo en el servidor original:
 ```bash
 admin@vps1:~$ sudo systemctl stop odoo.service
 ```
+### Failback del filestore de Odoo.
 
-Copiar el sincronisar el filestore desde el servidor de respaldo al servidor original:
+Para sincronizar el filestore del Odoo de respaldo sobre el Odoo original, simplemente utilzar rsync para replicar los cambios.
 ```bash
 odoo@respaldo:~$ sudo su - odoouser
-odoouser@respaldo:~$ rsync -azv --delete -P /opt/odoouser/respaldo_filestore/vps-clientes-1/ vps_clientes_1:/var/opt/odoo/data_dir
+odoouser@respaldo:~$ rsync -azvP --delete /opt/odoouser/respaldo_filestore/vps-clientes-1/data_dir vps_clientes_1:/var/opt/odoo/
 ```
-Una vez finalizada la copia, proceder a descomentar las tarea de sincronización desde la vps al respaldo en el crontab
+Una vez finalizada la copia de archivos, proceder a rehabilitar las tareas del cron relacionadas a la vps en el servidor. Para ello, proceder a descomentar las líneas necesarias en el crontab, eliminado el `#` en cada una de las líneas correspondientes.
+
 ```bash
+odoo@respaldo:~$ sudo su - odoouser
 odoouser@respaldo:~$ crontab -e
 ```
 Dentro del crontab proceder a descomentar la copia del directorio `datadir` del filestore, del directorio `sources` y del archivo `requirement.txt` de la VPS restablecida.
+
+
+Por último, deshabilitar la instancia de odoo del servidor de respaldo:
+```bash
+odoo@respaldo:~$ sudo systemctl stop odoo_vps_clientes_1.service
+odoo@respaldo:~$ sudo systemctl disenable odoo_vps_clientes_1.service
+odoo@respaldo:~$ sudo systemctl daemon-reload
+odoo@respaldo:~$ sudo rm /etc/systemd/system/odoo_vps_clientes_1.service
+```
+Tener en cuenta que los nombres son los que se habían utilizados al configurar la replicación.
 
 ### Failback del clúster posgresql
 
@@ -421,7 +434,7 @@ Para el failback del clúster de posgresql se procederá a configurar el clúste
 
 #### Configuración del clúster de respaldo como primario del clúster origial
 
-Asegurar la existencia de los usuarios `replica_user` y `replica_rewind` con sus respectivas passwords y habilitar su acceso al clúster de respaldo en el archivo `pg_hba.conf` correspondiente. Ver la sección [Configuración Clúster Principal para permitir la replicación](configuración-clúster-principal-para-permitir-la-replicación)
+Asegurar la existencia de los usuarios `replica_user` y `replica_rewind` con sus respectivas passwords y habilitar su acceso al clúster de respaldo en el archivo `pg_hba.conf` correspondiente. Ver la sección *Configuración Clúster Principal para permitir la replicación*
 
 El puerto del clúster de respaldo también debe ser accesible desde internet.
 
@@ -435,7 +448,7 @@ odoo@respaldo:~$ sudo -u postgresql -- psql -p5435 -c "select * from pg_create_p
 
 Para restablecer el servidor original como principal en la réplica, basicamente habrá que convertirlo en standby del clúster de respaldo, pero sin un backup inicial. Para lo cual el clúster de respaldo deberá estar comfigurado como principal.
 
-De esta forma los datos generados durante el fallo serán replicados al clúster original antes de proceder a promoverlo. Ver la sección [Replicación del cluster de la VPS](replicación-del-cluster-de-la-vps)
+De esta forma los datos generados durante el fallo serán replicados al clúster original antes de proceder a promoverlo. Ver la sección *Replicación del cluster de la VPS*.
 
 #### Creación del slot de replicación en el clúster de respaldo.
 
@@ -504,26 +517,8 @@ postgres=# select * from pg_drop_replication_slot('vps1');
 
 Llegado el caso de que no sea posible configurar el clúster original como standby del clúster de respaldo, sólo quedará la opción de realizar un backup del clúster de respaldo y restaurarlo al clúster principal. Ver en la sección [Replicación del cluster de la VPS](replicación-del-cluster-de-la-vps) como utilizar pg_basebackup realizar el backup y restaurarlo sobre el clúster original.
 
-### Failback del filestore de Odoo.
-Para sincronizar el filestore del Odoo de respaldo sobre el Odoo original, simplemente utilzar rsync para replicar los cambios.
-```bash
-odoo@respaldo:~$ sudo su - odoouser
-odoouser@respaldo:~$ rsync -azvP --delete /opt/odoouser/respaldo_filestore/vps-clientes-1/data_dir vps_clientes_1:/var/opt/odoo/
-```
-Una vez finalizada la copia de archivos, proceder a rehabilitar las tareas del cron relacionadas a la vps en el servidor. Para ello, proceder a descomentar las líneas necesarias en el crontab, eliminado el `#` en cada una de las líneas correspondientes.
-```bash
-odoo@respaldo:~$ sudo su - odoouser
-odoouser@respaldo:~$ crontab -e
-```
-Por último, deshabilitar la instancia de odoo del servidor de respaldo:
-```bash
-odoo@respaldo:~$ sudo systemctl stop odoo_vps_clientes_1.service
-odoo@respaldo:~$ sudo systemctl disenable odoo_vps_clientes_1.service
-odoo@respaldo:~$ sudo systemctl daemon-reload
-odoo@respaldo:~$ sudo rm /etc/systemd/system/odoo_vps_clientes_1.service
-```
-Tener en cuenta que los nombres son los que se habían utilizados al configurar la replicación.
 
 ## Pasos finales
 
 En este punto luego de verificar que el correcto funcionamiento de la Instancia de odoo en la VPS original, se procederá a reestablecer el dominio en el servicio de DNS correspondiente.
+Finalmente se tendrá que establecer el clúster de respaldo como standby del clúster original recuperado.

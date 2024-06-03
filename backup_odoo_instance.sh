@@ -10,6 +10,8 @@ conf_file=/home/sebastian/modulos/odoo.conf
 db_name=modulos
 # El path a donde guardar el respaldo
 backup_path=/home/sebastian/odoo_respaldo
+# El puerto del clúster a respaldar
+sql_port=5432
 
 # -- Fin Variables de Configuración --
 
@@ -24,7 +26,7 @@ tmp_dir=$(mktemp -qd) && {
 # Hacer el pg_dump al tmp_dir
 db_dump_file="$tmp_dir/dump.sql"
 echo "Iniciando pg_dump: "$db_name" -> "$db_dump_file""
-$cmd_dump --no-owner --file="$db_dump_file" -d "$db_name"
+$cmd_dump --no-owner --file="$db_dump_file" -d "$db_name" -p$sql_port
 
 # Crea un manifest.json, ver odoo.service.db.dump
 manifest_file="$tmp_dir"/manifest.json
@@ -32,9 +34,9 @@ manifest_file="$tmp_dir"/manifest.json
 odoo_version="15.0"
 odoo_version_info=[15,0,0,"final",0,""]
 odoo_major_version="15.0"
-pg_version=$($sql_psql -V | sed -r 's/.* ([0-9\.]+) .*/\1/p')
+pg_version=$($sql_psql -V -p$sql_port | sed -r 's/.* ([0-9\.]+) .*/\1/p')
 
-odoo_installed_modules=$($sql_psql -d $db_name -P pager=off \
+odoo_installed_modules=$($sql_psql -d $db_name -P pager=off -p$sql_port \
 -Atc "select  name, latest_version from ir_module_module where state='installed';" \
 | sed -nr 's/(.*)\|(.*)/"\1":"\2",/ ; $s/,$// ; p')
 

@@ -175,6 +175,9 @@ Host <nombre_host_remoto_n>
     User <user-odoo-vps_n>
 ```
 
+> #### Nota
+> Este archivo debe tener permisos `rw-r--r--`. En caso de ser necesario, estblecerlo con `chmod 0644 .ssh/config`
+
 En nuestro caso llamaremos al nuestro Host vps_clientes_1 con la ip 200.58.98.56, el puerto 5253 y el usuario odoo
 ```bash
 odoo@respaldo:~$ sudo su - odoouser

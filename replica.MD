@@ -425,7 +425,7 @@ Dentro del crontab proceder a descomentar la copia del directorio `datadir` del 
 Por último, deshabilitar la instancia de odoo del servidor de respaldo:
 ```bash
 odoo@respaldo:~$ sudo systemctl stop odoo_vps_clientes_1.service
-odoo@respaldo:~$ sudo systemctl disenable odoo_vps_clientes_1.service
+odoo@respaldo:~$ sudo systemctl disable odoo_vps_clientes_1.service
 odoo@respaldo:~$ sudo systemctl daemon-reload
 odoo@respaldo:~$ sudo rm /etc/systemd/system/odoo_vps_clientes_1.service
 ```

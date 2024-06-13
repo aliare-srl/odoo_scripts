@@ -263,7 +263,7 @@ odouser@respaldo:~$ crontab -e
 # Agregar una línea especificando que el filestore se actualizarán cada 5 minutos
 */5 * * * * rsync -azv --delete --partial --timeout=15 vps_clientes_1:/var/opt/odoo/data_dir /opt/odoouser/respaldo_filestore/vps-clientes-1/ 2>&1 | logger -et VPS_CLIENTES_1_FILESTORE
 # Agregar una línea especificado que los sources se copiarán una vez cada 12 horas
-* */12 * * * rsync -azv --delete --partial --timeout=15 vps_clientes_1:/opt/odoo/sources /opt/odoouser/respaldo_filestore/vps-clientes-1/ 2>&1 | logger -et VPS_CLIENTES_1_SOURCES
+0 */12 * * * rsync -azv --delete --partial --timeout=15 vps_clientes_1:/opt/odoo/sources /opt/odoouser/respaldo_filestore/vps-clientes-1/ 2>&1 | logger -et VPS_CLIENTES_1_SOURCES
 ```
 
 Ajustar el path de destino de la copia así como la etiqueta del logger, VPS_CLIENTES_1_SOURCES. Esta etiqueta podrá ser buscada en el syslog de Ubuntu.
@@ -276,7 +276,7 @@ odoo@vps_clientes_1:~$ crontab -e
 ```txt
 # agregar una línea especificado la creación del requirement.txt cada 12 horas dentro del home
 # Genera requirement.txt cada 12 horas para ser copiado al server de respaldo
-* */12 * * * /usr/bin/pip freeze > /opt/odoo/requirement.txt
+0 */12 * * * /usr/bin/pip freeze > /opt/odoo/requirement.txt
 ```
 
 Programar la copia del archivo requirement.txt cada 12 horas en el servidor de respaldo:
@@ -285,7 +285,7 @@ odoouser@respaldo:~$ crontab -e
 ```
 ```txt
 # Cada 12 horas sincroniza requirement.txt
-* */12 * * * rsync -azv --partial --timeout=15 vps_clientes_1:/opt/odoo/requirement.txt /opt/odoouser/respaldo_filestore/vps-clientes-1/ 2>&1 | logger -et VPS_CLIENTES_1_REQUIREMENT
+0 */12 * * * rsync -azv --partial --timeout=15 vps_clientes_1:/opt/odoo/requirement.txt /opt/odoouser/respaldo_filestore/vps-clientes-1/ 2>&1 | logger -et VPS_CLIENTES_1_REQUIREMENT
 ```
 ## Failover
 

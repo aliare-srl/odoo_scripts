@@ -23,4 +23,9 @@ cd
 sudo systemctl restart odoo.service
 ```
 
+> [!NOTE]
+> En caso de necesitar más tiempo para la instalación de un módulo, puede agregarse el parámtetro `--limit-time-real=99999` para evitar timeouts.
+
+
+
 

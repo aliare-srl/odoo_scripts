@@ -29,6 +29,7 @@ sudo systemctl restart odoo.service
 
 > [!NOTE]
 > Recordar configurar los backups siguiendo el instructivo de https://github.com/aliare-srl/odoo_scripts/blob/master/README.md de los archivos "backup_ftp.sh" y "backup_odoo_instance.sh"
+
 > En caso de necesitar más tiempo para la instalación de un módulo, puede agregarse el parámtetro `--limit-time-real=99999` para evitar timeouts.
 
 

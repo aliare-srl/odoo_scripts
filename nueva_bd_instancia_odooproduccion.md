@@ -29,7 +29,7 @@ sudo systemctl restart odoo.service
 
 - Recordar configurar los backups siguiendo el instructivo de https://github.com/aliare-srl/odoo_scripts/blob/master/README.md de los archivos "backup_ftp.sh" y "backup_odoo_instance.sh"
 - Recordar configurar dominio en: https://www.dynu.com/
-- Recordar configurar certificado en: https://github.com/aliare-srl/Documentacion/blob/main/Instalaci%C3%B3n%20ssl%20con%20certbot%20plug-in%20y%20certificado.md
+- Recordar REGISTRAR EL certificado en: https://github.com/aliare-srl/Documentacion/blob/main/Instalaci%C3%B3n%20ssl%20con%20certbot%20plug-in%20y%20certificado.md
 - En caso de necesitar más tiempo para la instalación de un módulo, puede agregarse el parámtetro `--limit-time-real=99999` para evitar timeouts.
 
 

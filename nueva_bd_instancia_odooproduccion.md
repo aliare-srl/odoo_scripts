@@ -27,6 +27,8 @@ sudo systemctl restart odoo.service
 /opt/odoo/odoo/odoo-bin -c /etc/odoo.conf -d NOMBREDELABD -i NOMBRETECNICODELMODULO --load-language es_AR --language es_AR -p 8070 --stop-after-init --without-demo=all
 ```
 - En caso de necesitar más tiempo para la instalación de un módulo, puede agregarse el parámtetro `--limit-time-real=99999` para evitar timeouts.
+- En caso de necesitar un update en vez de una instalacion cambiar -i por -u Ej: /etc/odoo.conf -d NOMBREDELABD -u NOMBRETECNICODELMODULO
+- En caso de necesitar ver un log al ejecutar ese comando agregar al final: --logfile ""
 
 ## Para finalizar con el alta de una nueva BD de produccion recordar realizar las siguientes configuraciones:
 - Configurar los backups en el servidor de respaldo siguiendo el instructivo de https://github.com/aliare-srl/odoo_scripts/blob/master/README.md de los archivos "backup_ftp.sh" y "backup_odoo_instance.sh"

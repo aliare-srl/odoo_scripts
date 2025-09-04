@@ -1,0 +1,23 @@
+📌 Cómo usarlo
+
+*Copiar este script *.py a una carpta del cliente en tu Ubuntu.
+
+*Modifica los parametros del script puerto del odoo, BD, user y clave.
+
+*Guardá los *.xlsx en la misma carpeta.
+
+*Instalá dependencias si no las tenés (por unica vez):
+
+pip install pandas xlrd
+
+
+*Ejecutá el script dentro de la carpta del cliente:
+
+python3 import_proveedores.py
+
+
+*Revisa el log generado:
+
+cat import_log_proveedores.txt
+
+Obs.: se deja en el repositorio el modelo de los excel a utilizar con sus columnas correspondientes.

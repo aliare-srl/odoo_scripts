@@ -20,6 +20,4 @@ python3 import_proveedores_scv.py
 cat import_log_proveedores.txt
 
 Obs.: se deja en el repositorio el modelo de los excel a utilizar con sus columnas correspondientes.
-*Instalá dependencias SOLO PARA USAR PANDA si no las tenés (por unica vez):
 
-apt install pandas xlrd

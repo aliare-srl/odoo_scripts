@@ -9,6 +9,7 @@ import xmlrpc.client
 import csv
 import logging
 import time
+import unicodedata
 
 # ---------------------------
 # CONFIGURACIÓN
@@ -43,17 +44,35 @@ if not uid:
     raise Exception("No se pudo autenticar en Odoo")
 
 # ---------------------------
-# FUNCIÓN: obtener o crear categoría padre
+# FUNCIONES AUXILIARES
 # ---------------------------
+def normalize_text(s):
+    """Normaliza texto: minúsculas, sin acentos ni espacios extras"""
+    if not s:
+        return ""
+    s = str(s).strip().lower()
+    s = ''.join(c for c in unicodedata.normalize('NFD', s)
+                if unicodedata.category(c) != 'Mn')
+    return s
+
 def get_or_create_parent(parent_name):
     try:
         if not parent_name:
             return False
-        parent_name = str(parent_name).strip()
-        parent = models.execute_kw(db, uid, password, 'pos.category', 'search', [[['name','=',parent_name]]], {'limit':1})
-        if parent:
-            return parent[0]
-        parent_id = models.execute_kw(db, uid, password, 'pos.category', 'create', [{'name': parent_name}])
+        parent_name = parent_name.strip()
+        existing = models.execute_kw(
+            db, uid, password,
+            'pos.category', 'search',
+            [[['name', '=', parent_name]]],
+            {'limit': 1}
+        )
+        if existing:
+            return existing[0]
+        parent_id = models.execute_kw(
+            db, uid, password,
+            'pos.category', 'create',
+            [{'name': parent_name}]
+        )
         logging.info(f"Categoría padre '{parent_name}' creada con ID {parent_id}.")
         return parent_id
     except Exception as e:
@@ -69,14 +88,17 @@ fail_count = 0
 batch_vals = []
 
 try:
-    csvfile = open(csv_file, newline='', encoding='utf-8', errors='replace')
+    csvfile = open(csv_file, newline='', encoding='utf-8-sig')  # <- UTF-8 con BOM para respetar acentos
 except UnicodeDecodeError:
-    csvfile = open(csv_file, newline='', encoding='latin-1', errors='replace')
+    csvfile = open(csv_file, newline='', encoding='latin-1')
 
 reader = csv.DictReader(csvfile)
 if "name" not in reader.fieldnames:
     logging.error("El CSV no contiene la columna obligatoria 'name'")
     raise Exception("El CSV no tiene la columna 'name'")
+
+# Diccionario para normalizar y evitar duplicados
+existing_normalized = {}
 
 for index, row in enumerate(reader, start=1):
     try:
@@ -88,26 +110,42 @@ for index, row in enumerate(reader, start=1):
             fail_count += 1
             continue
 
-        # Verificar duplicados
-        existing = models.execute_kw(db, uid, password, 'pos.category', 'search', [[['name','=',name]]], {'limit':1})
-        if existing:
-            logging.info(f"Fila {index}: categoría '{name}' ya existe, no se crea.")
+        # Normalizar nombre para control de duplicados
+        norm_name = normalize_text(name)
+        if norm_name in existing_normalized:
+            logging.info(f"Fila {index}: categoría duplicada por normalización '{name}', saltada.")
             continue
 
-        # Padre
+        # Verificar existencia exacta en Odoo
+        existing = models.execute_kw(
+            db, uid, password,
+            'pos.category', 'search',
+            [[['name','=',name]]],
+            {'limit': 1}
+        )
+        if existing:
+            logging.info(f"Fila {index}: categoría '{name}' ya existe, no se crea.")
+            existing_normalized[norm_name] = True
+            continue
+
+        # Crear padre si corresponde
         parent_id = get_or_create_parent(parent_name) if parent_name else False
 
         # Preparar batch
         vals = {'name': name}
         if parent_id:
             vals['parent_id'] = parent_id
-
         batch_vals.append(vals)
+        existing_normalized[norm_name] = True
         ok_count += 1
 
         # Crear batch si alcanza tamaño
         if len(batch_vals) >= batch_size:
-            created_ids = models.execute_kw(db, uid, password, 'pos.category', 'create', [batch_vals])
+            created_ids = models.execute_kw(
+                db, uid, password,
+                'pos.category', 'create',
+                [batch_vals]
+            )
             logging.info(f"Batch de {len(batch_vals)} categorías creado. IDs: {created_ids}")
             batch_vals = []
 
@@ -117,7 +155,11 @@ for index, row in enumerate(reader, start=1):
 
 # Crear registros restantes
 if batch_vals:
-    created_ids = models.execute_kw(db, uid, password, 'pos.category', 'create', [batch_vals])
+    created_ids = models.execute_kw(
+        db, uid, password,
+        'pos.category', 'create',
+        [batch_vals]
+    )
     logging.info(f"Último batch de {len(batch_vals)} categorías creado. IDs: {created_ids}")
 
 csvfile.close()

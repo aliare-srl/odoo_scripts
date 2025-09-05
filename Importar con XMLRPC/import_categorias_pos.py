@@ -1,17 +1,27 @@
-import pandas as pd
+"""
+Script BULK ULTRA de importación de categorías TPV a Odoo 15 vía XML-RPC
+Lee: categorias_tpv.csv
+Genera log de errores: import_log_tpv.txt
+Importación por lotes (batch) para mayor velocidad
+"""
+
 import xmlrpc.client
+import csv
 import logging
+import time
+import unicodedata
 
 # ---------------------------
 # CONFIGURACIÓN
 # ---------------------------
-url = "http://localhost:8069"   # URL de tu Odoo
-db = "nombre_de_tu_base"        # Base de datos
-username = "admin"              # Usuario
-password = "admin"              # Contraseña
+url = "http://localhost:8069"
+db = "nombre_de_tu_base"
+username = "admin"
+password = "admin"
 
-excel_file = "categorias_tpv.xlsx"
-log_file = "import_log.txt"
+csv_file = "categorias_tpv.csv"
+log_file = "import_log_tpv.txt"
+batch_size = 50  # registros por batch
 
 # ---------------------------
 # LOGGING
@@ -34,32 +44,30 @@ if not uid:
     raise Exception("No se pudo autenticar en Odoo")
 
 # ---------------------------
-# LECTURA DEL EXCEL
+# FUNCIONES AUXILIARES
 # ---------------------------
-df = pd.read_excel(excel_file)
+def normalize_text(s):
+    """Normaliza texto: minúsculas, sin acentos ni espacios extras"""
+    if not s:
+        return ""
+    s = str(s).strip().lower()
+    s = ''.join(c for c in unicodedata.normalize('NFD', s)
+                if unicodedata.category(c) != 'Mn')
+    return s
 
-# Validar que exista la columna 'name'
-if "name" not in df.columns:
-    logging.error("El Excel no contiene la columna 'name'")
-    raise Exception("El Excel no tiene la columna 'name'")
-
-
-# ---------------------------
-# FUNCIÓN: obtener o crear categoría padre
-# ---------------------------
 def get_or_create_parent(parent_name):
-    """Busca el ID de la categoría padre, y si no existe, la crea."""
     try:
-        parent = models.execute_kw(
+        if not parent_name:
+            return False
+        parent_name = parent_name.strip()
+        existing = models.execute_kw(
             db, uid, password,
             'pos.category', 'search',
             [[['name', '=', parent_name]]],
             {'limit': 1}
         )
-        if parent:
-            return parent[0]
-
-        # Crear la categoría padre
+        if existing:
+            return existing[0]
         parent_id = models.execute_kw(
             db, uid, password,
             'pos.category', 'create',
@@ -67,53 +75,98 @@ def get_or_create_parent(parent_name):
         )
         logging.info(f"Categoría padre '{parent_name}' creada con ID {parent_id}.")
         return parent_id
-
     except Exception as e:
         logging.error(f"Error al crear/buscar categoría padre '{parent_name}': {e}")
         return False
 
+# ---------------------------
+# LECTURA CSV Y BULK ULTRA
+# ---------------------------
+start_time = time.time()
+ok_count = 0
+fail_count = 0
+batch_vals = []
 
-# ---------------------------
-# IMPORTACIÓN
-# ---------------------------
-for index, row in df.iterrows():
+try:
+    csvfile = open(csv_file, newline='', encoding='utf-8-sig')  # <- UTF-8 con BOM para respetar acentos
+except UnicodeDecodeError:
+    csvfile = open(csv_file, newline='', encoding='latin-1')
+
+reader = csv.DictReader(csvfile)
+if "name" not in reader.fieldnames:
+    logging.error("El CSV no contiene la columna obligatoria 'name'")
+    raise Exception("El CSV no tiene la columna 'name'")
+
+# Diccionario para normalizar y evitar duplicados
+existing_normalized = {}
+
+for index, row in enumerate(reader, start=1):
     try:
-        name = str(row["name"]).strip()
-        parent_name = str(row["parent_id/id"]).strip() if pd.notna(row["parent_id/id"]) else None
+        name = str(row.get("name") or "").strip()
+        parent_name = row.get("parent_id/id") or row.get("parent_id/name")
 
-        if not name or name.lower() == "nan":
-            logging.warning(f"Fila {index+1}: categoría vacía, saltada.")
+        if not name:
+            logging.warning(f"Fila {index}: categoría vacía, saltada.")
+            fail_count += 1
             continue
 
-        # Verificar si ya existe
+        # Normalizar nombre para control de duplicados
+        norm_name = normalize_text(name)
+        if norm_name in existing_normalized:
+            logging.info(f"Fila {index}: categoría duplicada por normalización '{name}', saltada.")
+            continue
+
+        # Verificar existencia exacta en Odoo
         existing = models.execute_kw(
             db, uid, password,
             'pos.category', 'search',
-            [[['name', '=', name]]]
+            [[['name','=',name]]],
+            {'limit': 1}
         )
-
         if existing:
-            logging.info(f"Fila {index+1}: categoría '{name}' ya existe, no se crea.")
+            logging.info(f"Fila {index}: categoría '{name}' ya existe, no se crea.")
+            existing_normalized[norm_name] = True
             continue
 
-        # Obtener o crear categoría padre
-        parent_id = False
-        if parent_name:
-            parent_id = get_or_create_parent(parent_name)
+        # Crear padre si corresponde
+        parent_id = get_or_create_parent(parent_name) if parent_name else False
 
-        # Crear la categoría
+        # Preparar batch
         vals = {'name': name}
         if parent_id:
             vals['parent_id'] = parent_id
+        batch_vals.append(vals)
+        existing_normalized[norm_name] = True
+        ok_count += 1
 
-        new_id = models.execute_kw(
-            db, uid, password,
-            'pos.category', 'create',
-            [vals]
-        )
-        logging.info(f"Fila {index+1}: categoría '{name}' creada con ID {new_id}.")
+        # Crear batch si alcanza tamaño
+        if len(batch_vals) >= batch_size:
+            created_ids = models.execute_kw(
+                db, uid, password,
+                'pos.category', 'create',
+                [batch_vals]
+            )
+            logging.info(f"Batch de {len(batch_vals)} categorías creado. IDs: {created_ids}")
+            batch_vals = []
 
     except Exception as e:
-        logging.error(f"Fila {index+1}: error al importar '{row.to_dict()}': {e}")
+        logging.error(f"Fila {index}: error al importar '{row}': {e}")
+        fail_count += 1
 
-print("✅ Importación finalizada. Revisa el archivo import_log.txt para detalles.")
+# Crear registros restantes
+if batch_vals:
+    created_ids = models.execute_kw(
+        db, uid, password,
+        'pos.category', 'create',
+        [batch_vals]
+    )
+    logging.info(f"Último batch de {len(batch_vals)} categorías creado. IDs: {created_ids}")
+
+csvfile.close()
+elapsed_time = time.time() - start_time
+
+print(f"✅ Importación BULK ULTRA de categorías TPV finalizada.")
+print(f"Registros importados correctamente: {ok_count}")
+print(f"Registros fallidos: {fail_count}")
+print(f"Tiempo de ejecución: {elapsed_time:.2f} segundos")
+print(f"Revisa el archivo {log_file} para detalles.")

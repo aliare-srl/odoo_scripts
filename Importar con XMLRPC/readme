@@ -8,7 +8,7 @@
 
 *Instalá dependencias si no las tenés (por unica vez):
 
-pip install pandas xlrd
+apt install pandas xlrd
 
 
 *Ejecutá el script dentro de la carpta del cliente:

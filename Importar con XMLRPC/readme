@@ -4,7 +4,7 @@
 
 *Modifica los parametros del script puerto del odoo, BD, user y clave.
 
-*Guardá los *.SCV en la misma carpeta con Modo Unicode UTF-8.
+*Guardá los *.CSV en la misma carpeta con Modo Unicode UTF-8.
 
 *Ejecutá el script dentro de la carpta del cliente en el siguiente orden:
 1.categorias articulos

@@ -144,6 +144,9 @@ SELECT
     -- Nombre del producto
     ISNULL(a.descripcion, '') AS name,
 
+    -- Descripción en formato HTML
+    '<p>' + ISNULL(LTRIM(RTRIM(a.descripcion)), '') + '</p>' AS description,
+
     -- Código de barras: solo si existe y es el último repetido
     CASE 
         WHEN a.cod_barra IS NULL OR LTRIM(RTRIM(a.cod_barra)) = '' THEN ''
@@ -199,5 +202,7 @@ LEFT JOIN rubros r ON a.id_rubro = r.id_rubro
 WHERE a.inhabilitado = 0
   AND a.descripcion IS NOT NULL
   AND LTRIM(RTRIM(a.descripcion)) <> ''
+
+
 
 

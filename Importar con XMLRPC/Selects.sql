@@ -115,9 +115,14 @@ SELECT
     ISNULL(c.dir, '') AS street,
 
     -- Teléfono
-    ISNULL(c.telefono, '') AS phone_mobile_search
+    ISNULL(c.telefono, '') AS phone_mobile_search,
+
+    -- Valores estáticos para Odoo (inversos)
+    1 AS customer_rank, 
+    0 AS supplier_rank
 
 FROM clientes c;
+
 
 
 
@@ -194,4 +199,5 @@ LEFT JOIN rubros r ON a.id_rubro = r.id_rubro
 WHERE a.inhabilitado = 0
   AND a.descripcion IS NOT NULL
   AND LTRIM(RTRIM(a.descripcion)) <> ''
+
 

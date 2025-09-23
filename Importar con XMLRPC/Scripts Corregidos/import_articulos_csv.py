@@ -8,6 +8,7 @@ import xmlrpc.client
 import csv
 import traceback
 import time
+import logging
 
 # ---------- CONFIG ----------
 url = "http://localhost:8073"
@@ -20,6 +21,14 @@ error_log_path = "import_articulos_errors.txt"
 # -----------------------------
 
 start_time = time.time()
+
+# Configuración de logs
+logging.basicConfig(
+    filename=error_log_path,
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    encoding="utf-8"
+)
 
 # Conectar XML-RPC
 common = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/common')
@@ -119,18 +128,38 @@ def try_assign_brand(vals, brand_name):
             brands_cache[key] = new_brand_id
             vals['product_brand_id'] = new_brand_id
     except Exception as e:
-        with open(error_log_path, "a", encoding="utf-8") as log:
-            log.write(f"Error asignando marca '{brand_name}': {e}\n")
-            log.write(traceback.format_exc() + "\n")
-            log.write("-"*70 + "\n")
+        logging.error(f"Error asignando marca '{brand_name}': {e}")
+        logging.error(traceback.format_exc())
 
 def create_or_update_supplierinfo(product_tmpl_id, partner_id):
-    if not product_tmpl_id or not partner_id:
-        return
-    domain = [['name', '=', partner_id], ['product_tmpl_id', '=', product_tmpl_id]]
-    existing = models.execute_kw(db, uid, password, 'product.supplierinfo', 'search', [domain], {'limit': 1})
-    if not existing:
-        models.execute_kw(db, uid, password, 'product.supplierinfo', 'create', [{'name': partner_id, 'product_tmpl_id': product_tmpl_id}])
+    """Asocia un proveedor a un producto evitando duplicados"""
+    try:
+        domain = [
+            ('product_tmpl_id', '=', product_tmpl_id),
+            ('name', '=', partner_id)
+        ]
+        existing = models.execute_kw(
+            db, uid, password,
+            'product.supplierinfo', 'search',
+            [domain], {'limit': 1}
+        )
+        if existing:
+            return existing[0]
+
+        supplier_vals = {
+            'product_tmpl_id': product_tmpl_id,
+            'name': partner_id,
+        }
+        supplier_id = models.execute_kw(
+            db, uid, password,
+            'product.supplierinfo', 'create',
+            [supplier_vals]
+        )
+        return supplier_id
+    except Exception as e:
+        logging.error(f"Error asignando proveedor {partner_id} al producto {product_tmpl_id}: {e}")
+        logging.error(traceback.format_exc())
+        return None
 
 # ---------- LEER CSV ----------
 try:
@@ -149,7 +178,8 @@ ok_count = 0
 fail_count = 0
 new_products = []
 update_products = []
-supplier_bulk = []
+supplier_links_new = []   # productos nuevos con proveedor
+supplier_links_exist = [] # productos existentes con proveedor
 
 for idx, row in enumerate(reader, start=1):
     total += 1
@@ -198,15 +228,16 @@ for idx, row in enumerate(reader, start=1):
                 vals['taxes_id'] = [(6, 0, tax_ids)]
         try_assign_brand(vals, row.get('product_brand_id'))
         if has_value(row.get('available_in_pos')):
-            vals['available_in_pos'] = bool_from_value(row['available_in_pos'])
+            vals['available_in_pos'] = bool_from_value(row.get('available_in_pos'))
 
         if product_tmpl_id:
             update_products.append((product_tmpl_id, vals))
+            if has_value(row.get('seller_ids')):
+                supplier_links_exist.append((product_tmpl_id, row.get('seller_ids')))
         else:
             new_products.append(vals)
-
-        if has_value(row.get('seller_ids')):
-            supplier_bulk.append((product_tmpl_id if product_tmpl_id else None, row.get('seller_ids')))
+            if has_value(row.get('seller_ids')):
+                supplier_links_new.append((len(new_products)-1, row.get('seller_ids')))  # guardo índice del producto nuevo
 
         ok_count += 1
 
@@ -227,28 +258,32 @@ if new_products:
     if isinstance(created_ids, int):
         created_ids = [created_ids]
 
-# Mapear supplier_bulk con productos recién creados
-created_index = 0
-updated_supplier_bulk = []
-for product_tmpl_id, partner_val in supplier_bulk:
-    if not has_value(partner_val):
-        continue
-    if product_tmpl_id:
-        updated_supplier_bulk.append((product_tmpl_id, partner_val))
-    else:
-        if created_index < len(created_ids):
-            updated_supplier_bulk.append((created_ids[created_index], partner_val))
-            created_index += 1
-
 # ---------- BULK WRITE EXISTENTES ----------
 for product_id, vals in update_products:
     models.execute_kw(db, uid, password, 'product.template', 'write', [[product_id], vals])
 
-# ---------- BULK SUPPLIERINFO ----------
-for product_tmpl_id, partner_val in updated_supplier_bulk:
-    partner_id = search_or_create_partner(partner_val)
-    if product_tmpl_id and partner_id:
-        create_or_update_supplierinfo(product_tmpl_id, partner_id)
+# ---------- SUPPLIERINFO ----------
+# Proveedores productos existentes
+for product_tmpl_id, partner_name in supplier_links_exist:
+    try:
+        partner_id = search_or_create_partner(partner_name)
+        if partner_id:
+            create_or_update_supplierinfo(product_tmpl_id, partner_id)
+    except Exception as e:
+        logging.error(f"Error asignando proveedor '{partner_name}' al producto ID {product_tmpl_id}: {e}")
+        logging.error(traceback.format_exc())
+
+# Proveedores productos nuevos (mapear índice del new_products con created_ids)
+for idx_new, partner_name in supplier_links_new:
+    if idx_new < len(created_ids):
+        product_tmpl_id = created_ids[idx_new]
+        try:
+            partner_id = search_or_create_partner(partner_name)
+            if partner_id:
+                create_or_update_supplierinfo(product_tmpl_id, partner_id)
+        except Exception as e:
+            logging.error(f"Error asignando proveedor '{partner_name}' al producto nuevo ID {product_tmpl_id}: {e}")
+            logging.error(traceback.format_exc())
 
 end_time = time.time()
 elapsed_time = end_time - start_time

@@ -1,13 +1,16 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import xmlrpc.client
 import csv
 import traceback
 import time
 import logging
-from http.client import RemoteDisconnected
-from xmlrpc.client import Fault
+import sys
+import re
 
 # ---------- CONFIG ----------
-url = "http://localhost:8069"
+url = "http://localhost:8073"
 db = "test"
 username = "admin"
 password = "admin"
@@ -15,373 +18,314 @@ password = "admin"
 csv_path = "articulos.csv"
 error_log_path = "import_articulos_errors.txt"
 
-# Ajustes de rendimiento y reporting
-DEFAULT_CHUNK_SIZE = 100   
-UPDATE_CHUNK_SIZE = 200     
-MAX_RETRIES = 3           
-SLEEP_BETWEEN_CHUNKS = 0.5  # Respiro entre grandes operaciones bulk
-PROGRESS_REPORT_INTERVAL = 500 # Reportar progreso de lectura cada N filas
+COL_IMPUESTOS = 'taxes_id/id' 
+COL_PROVEEDOR = 'seller_ids'
+COL_CATEGORIA = 'categ_id'
+COL_MARCA = 'product_brand_id'
+COL_CATEGORIA_POS = 'pos_categ_id'
+
+TYPE_MAPPING = {
+    'almacenable': 'product',
+    'consumible': 'consu',
+    'servicio': 'service'
+}
+
+DEFAULT_CHUNK_SIZE = 200
+MAX_RETRIES = 3
+SLEEP_BETWEEN_CHUNKS = 0.2
+PROGRESS_REPORT_INTERVAL = 1000
 # -----------------------------
 
 start_time = time.time()
 
-# Configuración de logs
-logging.basicConfig(
-    filename=error_log_path,
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(filename=error_log_path, level=logging.INFO,
+                    format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Conectar XML-RPC
-common = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/common')
-uid = common.authenticate(db, username, password, {})
-if not uid:
-    raise Exception("Autenticación fallida. Revisa url/db/usuario/contraseña")
-models = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/object')
+try:
+    common = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/common')
+    uid = common.authenticate(db, username, password, {})
+    if not uid:
+        raise Exception("Autenticación fallida.")
+    models = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/object')
+    print("✅ Conexión a Odoo exitosa.")
+except Exception as e:
+    print(f"❌ Error de conexión: {e}")
+    sys.exit(1)
 
-# ---------- CACHE ----------
+# ---------- CACHES ----------
+partners_cache = {}
 categories_cache = {}
-pos_categories_cache = {}
 brands_cache = {}
-partners_cache = {} 
-taxes_cache = {}
+pos_categories_cache = {}
+taxes_normalized_cache = {}
 
-# ---------- UTIL ----------
-def bool_from_value(v):
-    if v is None or str(v).strip() == "":
-        return False
-    if isinstance(v, bool):
-        return v
-    s = str(v).strip().lower()
-    return s in ("1", "true", "verdadero", "si", "sí", "y", "yes")
-
+# ---------- UTILS ----------
 def has_value(v):
     return v is not None and str(v).strip() != ""
 
-def chunks_with_data(lst, n):
-    for i in range(0, len(lst), n):
-        yield i, lst[i:i + n]
+def parse_boolean(v):
+    s = str(v).strip().lower()
+    return s in ("1", "true", "verdadero", "si", "s", "y", "yes") if has_value(v) else False
 
-def create_chunk_with_retry(chunk, attempt_no):
+def normalize_key(s):
+    """Limpia la cadena para usarla como clave de caché: strip, upper, y cambia ',' por '.'"""
+    return str(s).strip().upper().replace(',', '.')
+
+def collect_unique_values_from_csv(column_name):
+    values = set()
     try:
-        created = models.execute_kw(db, uid, password, 'product.template', 'create', [chunk])
-        return created
-    except RemoteDisconnected:
-        raise
-    except Fault:
-        raise
-    except Exception:
-        raise
+        with open(csv_path, mode='r', newline='', encoding='utf-8', errors='replace') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                if has_value(row.get(column_name)):
+                    values.add(str(row[column_name]).strip())
+    except FileNotFoundError:
+        print(f"❌ ERROR: No se encontró el archivo '{csv_path}'")
+        sys.exit(1)
+    return values
 
-# ----------------------------------------------------
-# PRECARGA Y UTILIDADES (se mantienen)
-# ----------------------------------------------------
-
-def preload_static_data():
-    logging.info("Iniciando precarga de datos comunes...")
-    try:
-        categories = models.execute_kw(db, uid, password, 'product.category', 'search_read', [[]], {'fields': ['id', 'name', 'parent_id']})
-        for cat in categories:
-            parent_id_val = cat.get('parent_id')[0] if cat.get('parent_id') else False
-            categories_cache[(str(cat['name']).strip(), parent_id_val)] = cat['id']
-        pos_categories = models.execute_kw(db, uid, password, 'pos.category', 'search_read', [[]], {'fields': ['id', 'name']})
-        for cat in pos_categories:
-            pos_categories_cache[str(cat['name']).strip()] = cat['id']
-        taxes = models.execute_kw(db, uid, password, 'account.tax', 'search_read', [[]], {'fields': ['id', 'name']})
-        for tax in taxes: taxes_cache[str(tax['name']).strip()] = [tax['id']]
-        brands = models.execute_kw(db, uid, password, 'product.brand', 'search_read', [[]], {'fields': ['id', 'name']})
-        for brand in brands: brands_cache[str(brand['name']).strip()] = brand['id']
-    except Exception as e:
-        logging.error(f"Error en precarga estática: {e}")
-    logging.info("Precarga de datos estáticos finalizada.")
-
-def search_or_create_entity(model, name, cache, extra_vals=None):
-    if not has_value(name): return False
-    key = str(name).strip()
-    if key in cache: return cache[key]
-    vals = {'name': key}
-    if extra_vals: vals.update(extra_vals)
-    try:
-        new_id = models.execute_kw(db, uid, password, model, 'create', [vals])
-        cache[key] = new_id
-        return new_id
-    except Exception as e:
-        logging.error(f"Error creando {model} '{name}': {e}")
-        return False
-        
-def search_or_create_category(cat_name, parent_id=False):
-    key = (str(cat_name).strip(), parent_id)
-    if key in categories_cache: return categories_cache[key]
-    vals = {'name': str(cat_name).strip()}
-    if parent_id: vals['parent_id'] = parent_id
-    try:
-        new_id = models.execute_kw(db, uid, password, 'product.category', 'create', [vals])
-        categories_cache[key] = new_id
-        return new_id
-    except Exception as e:
-        logging.error(f"Error creando categoría '{cat_name}': {e}")
-        return False
-        
-def find_tax_by_name(name):
-    if not has_value(name): return []
-    key = str(name).strip()
-    return taxes_cache.get(key, [])
-
-def try_assign_brand(vals, brand_name):
-    if not has_value(brand_name): return
-    key = str(brand_name).strip()
-    if key in brands_cache:
-        vals['product_brand_id'] = brands_cache[key]
+def preload_or_create_entities(model, names_set, cache, extra_create_vals=None):
+    if not names_set:
         return
-    brand_id = search_or_create_entity('product.brand', brand_name, brands_cache)
-    if brand_id:
-        vals['product_brand_id'] = brand_id
-
-def bulk_write_by_execute(model_name, updates):
-    calls = []
-    for product_id, vals in updates:
-        calls.append(('write', [[product_id], vals]))
     
-    if calls:
-        t0 = time.time()
-        try:
-            models.execute(db, uid, password, model_name, calls)
-            dt = time.time() - t0
-            logging.info(f"BULK WRITE EXECUTE completado. Llamadas: {len(calls)} en {dt:.2f}s.")
-            return True
-        except Exception as e:
-            logging.error(f"Fallo en bulk_write_by_execute para {model_name}: {e}. Recurriendo a individual...")
-            return False
-
-# ----------------------------------------------------
-# PRECARGA AVANZADA DE PARTNERS 
-# ----------------------------------------------------
-
-def collect_unique_partners(csv_reader):
-    partner_names = set()
-    csv_reader.seek(0)
-    temp_reader = csv.DictReader(csv_reader)
-    for row in temp_reader:
-        if has_value(row.get('seller_ids')):
-            partner_names.add(str(row['seller_ids']).strip())
-    csv_reader.seek(0)
-    return partner_names
-
-def preload_and_create_partners(unique_partner_names):
-    if not unique_partner_names: return
-    partner_names_list = list(unique_partner_names)
+    names_list = list(names_set)
+    existing_records = models.execute_kw(db, uid, password, model, 'search_read',
+                                         [[['name', 'in', names_list]]], {'fields': ['id', 'name']})
     
-    domain = [['name', 'in', partner_names_list]]
-    existing_partners = models.execute_kw(db, uid, password, 'res.partner', 'search_read', [domain], {'fields': ['id', 'name']})
     found_names = set()
-    for partner in existing_partners:
-        partners_cache[str(partner['name']).strip()] = partner['id']
-        found_names.add(str(partner['name']).strip())
-
-    new_partner_names = unique_partner_names - found_names
-    if new_partner_names:
-        new_partners_vals = [{'name': name, 'supplier_rank': 1} for name in new_partner_names]
-        try:
-            new_ids = models.execute_kw(db, uid, password, 'res.partner', 'create', [new_partners_vals])
-            for i, name in enumerate(new_partner_names):
-                partners_cache[name] = new_ids[i]
-            logging.info(f"Creados {len(new_ids)} nuevos partners en bulk.")
-        except Exception as e:
-            logging.error(f"Fallo en bulk create de partners: {e}")
-
-# ----------------------------------------------------
-# PROCESAMIENTO PRINCIPAL
-# ----------------------------------------------------
-
-preload_static_data()
-
-try:
-    csvfile = open(csv_path, newline='', encoding='utf-8', errors='replace')
-except UnicodeDecodeError:
-    csvfile = open(csv_path, newline='', encoding='latin-1', errors='replace')
-
-unique_partners = collect_unique_partners(csvfile)
-preload_and_create_partners(unique_partners)
-
-csvfile.seek(0)
-reader = csv.DictReader(csvfile)
-
-with open(error_log_path, "a", encoding="utf-8") as log:
-    log.write("LOG BULK ULTRA DE IMPORTACIÓN DE PRODUCTOS (ERRORES)\n")
-    log.write("="*70 + "\n\n")
-
-total = 0
-ok_count = 0
-fail_count = 0
-new_products = []
-supplier_links = []       # (idx_in_new_products, partner_name)
-
-print(f"\n[INICIO] Lectura del CSV iniciada. Reporte cada {PROGRESS_REPORT_INTERVAL} filas.")
-
-for idx, row in enumerate(reader, start=1):
-    total += 1
+    for record in existing_records:
+        clean_name = str(record['name']).strip()
+        cache[normalize_key(clean_name)] = record['id']
+        found_names.add(clean_name)
     
-    if idx % PROGRESS_REPORT_INTERVAL == 0:
-        elapsed = time.time() - start_time
-        print(f"[PROGRESSO CSV] Fila: {idx} | Tiempo: {elapsed:.2f}s")
-        logging.info(f"Progreso de lectura del CSV - Fila: {idx}")
+    new_names_to_create = names_set - found_names
+    
+    if new_names_to_create:
+        sorted_new_names = sorted(list(new_names_to_create))
+        vals_to_create = []
+        base_vals = extra_create_vals or {}
+        for name in sorted_new_names:
+            vals = {'name': name}
+            vals.update(base_vals)
+            vals_to_create.append(vals)
+        try:
+            new_ids = models.execute_kw(db, uid, password, model, 'create', [vals_to_create])
+            if isinstance(new_ids, int): 
+                new_ids = [new_ids]
+            for i, name in enumerate(sorted_new_names):
+                if i < len(new_ids):
+                    cache[normalize_key(name)] = new_ids[i]
+        except Exception as e:
+            logging.error(f"Fallo en bulk create de '{model}': {e}")
+            
+# ----------------------------------------------------
+# FASE 1: PRECARGA IMPUESTOS Y ENTIDADES
+# ----------------------------------------------------
+print("\n--- FASE 1: PRECARGA TOTAL DE DATOS ---")
 
-    try:
-        name = row.get('name')
-        if not has_value(name):
-            raise Exception("Falta el campo 'name'")
+taxes = models.execute_kw(db, uid, password, 'account.tax', 'search_read', [[]], {'fields': ['id', 'name']})
+for tax in taxes:
+    name = str(tax.get('name', '')).strip()
+    tax_id = tax.get('id')
+    taxes_normalized_cache[normalize_key(name)] = tax_id
+
+print(f"✅ Precargados {len(taxes_normalized_cache)} impuestos usando clave normalizada.")
+
+unique_partners = collect_unique_values_from_csv(COL_PROVEEDOR)
+unique_brands = collect_unique_values_from_csv(COL_MARCA)
+unique_categories = collect_unique_values_from_csv(COL_CATEGORIA)
+unique_pos_categories = collect_unique_values_from_csv(COL_CATEGORIA_POS)
+
+preload_or_create_entities('res.partner', unique_partners, partners_cache, {'supplier_rank': 1})
+preload_or_create_entities('product.brand', unique_brands, brands_cache)
+preload_or_create_entities('product.category', unique_categories, categories_cache)
+preload_or_create_entities('pos.category', unique_pos_categories, pos_categories_cache)
+
+# ----------------------------------------------------
+# FASE 2: PROCESAMIENTO Y CREACIÓN DE PRODUCTOS
+# ----------------------------------------------------
+print("\n--- FASE 2: PROCESAMIENTO Y CREACIÓN DE PRODUCTOS ---")
+
+products_to_create = []
+supplier_links = []
+sales_tax_links = [] # NUEVA LISTA para los IDs que necesitan actualizar el impuesto de venta
+
+def find_tax_ids_for_csv_value(csv_tax_value):
+    result_ids = []
+    if not has_value(csv_tax_value):
+        return result_ids
         
-        vals = {
-            'name': str(name).strip(),
-            'default_code': str(row.get('default_code')).strip() if has_value(row.get('default_code')) else False,
-            'barcode': str(row.get('barcode')).strip() if has_value(row.get('barcode')) else False,
-            'type': 'product',
-            'purchase_ok': bool_from_value(row.get('purchase_ok')),
-            'sale_ok': bool_from_value(row.get('sale_ok')),
-        }
+    parts = [p.strip() for p in re.split(r'[;,|]', csv_tax_value) if p.strip()] 
+    
+    for p in parts:
+        norm = normalize_key(p)
+        if norm in taxes_normalized_cache:
+            tax_id = taxes_normalized_cache[norm]
+            if tax_id not in result_ids:
+                result_ids.append(tax_id)
+        else:
+            logging.warning(f"Impuesto '{p}' (Normalizado: '{norm}') no encontrado en caché de Odoo. Se omite.")
 
-        if has_value(row.get('description')): vals['description'] = str(row['description']).strip()
-        if has_value(row.get('description_sale')): vals['description_sale'] = str(row['description_sale']).strip()
-        
-        if has_value(row.get('purchase_method')):
-            pm = str(row['purchase_method']).strip().lower()
-            vals['purchase_method'] = 'purchase' if "pedid" in pm else 'receive' if "recibid" in pm else pm
+    return result_ids
 
-        for col in ['standard_price', 'list_price']:
-            if col in row and has_value(row[col]):
-                try: vals[col] = float(str(row[col]).replace(',', ''))
-                except: pass
+with open(csv_path, mode='r', newline='', encoding='utf-8', errors='replace') as csvfile:
+    reader = csv.DictReader(csvfile)
+    for idx, row in enumerate(reader, start=1):
+        if idx % PROGRESS_REPORT_INTERVAL == 0:
+            print(f"[PROGRESO] Procesando fila {idx} del CSV...")
 
-        if has_value(row.get('categ_id')):
-            vals['categ_id'] = search_or_create_category(row['categ_id'])
-        if has_value(row.get('pos_categ_id')):
-            vals['pos_categ_id'] = search_or_create_entity('pos.category', row['pos_categ_id'], pos_categories_cache)
-        if has_value(row.get('taxes_id/id')):
-            tax_ids = find_tax_by_name(row['taxes_id/id'])
-            if tax_ids: vals['taxes_id'] = [(6, 0, tax_ids)]
-        try_assign_brand(vals, row.get('product_brand_id'))
-        if has_value(row.get('available_in_pos')):
-            vals['available_in_pos'] = bool_from_value(row['available_in_pos'])
+        try:
+            if not has_value(row.get('name')): continue
 
-        new_products.append(vals)
-        if has_value(row.get('seller_ids')):
-            supplier_links.append((len(new_products)-1, row.get('seller_ids')))
+            raw_type = str(row.get('detailed_type','')).strip().lower()
+            product_type = TYPE_MAPPING.get(raw_type, 'product')
+            raw_description = str(row.get('description','')).strip()
+            clean_description = raw_description.replace('<p>', '').replace('</p>', '').strip() or False
 
-        ok_count += 1
+            # Obtenemos los booleanos del CSV una sola vez
+            sale_ok = parse_boolean(row.get('sale_ok'))
+            purchase_ok = parse_boolean(row.get('purchase_ok'))
 
-    except Exception as e:
-        fail_count += 1
-        with open(error_log_path, "a", encoding="utf-8") as log:
-            log.write(f"Fila {idx} - Producto: {row.get('name')}\n")
-            log.write(f"Error: {str(e)}\n")
-            log.write(traceback.format_exc() + "\n")
-            log.write("-"*70 + "\n")
-
-csvfile.close()
-print("[INFO] Lectura del CSV finalizada. Iniciando creación BULK.")
-
-# ---------- BULK CREATE NUEVOS PRODUCTOS (Se mantiene el retry) ----------
-created_ids_global = []
-if new_products:
-    logging.info(f"Iniciando creación de {len(new_products)} productos en chunks de {DEFAULT_CHUNK_SIZE}")
-    start_index = 0
-    while start_index < len(new_products):
-        end_index = min(start_index + DEFAULT_CHUNK_SIZE, len(new_products))
-        chunk = new_products[start_index:end_index]
-        attempt = 0
-        success = False
-        
-        while attempt < MAX_RETRIES and not success:
-            attempt += 1
+            standard_price = 0
+            list_price = 0
             try:
-                t0 = time.time()
-                created = create_chunk_with_retry(chunk, attempt)
-                
-                created_list = [created] if isinstance(created, int) else list(created)
-                created_ids_global.extend(created_list)
-                
-                dt = time.time() - t0
-                print(f"[CREATE] Chunk: {end_index}/{len(new_products)} | Tiempo: {dt:.2f}s")
-                logging.info(f"Chunk creado [{start_index}:{end_index}] en {dt:.2f}s.")
-                success = True
-                time.sleep(SLEEP_BETWEEN_CHUNKS) # Respiro para el servidor
-                
-            except (RemoteDisconnected, Fault):
-                logging.error(f"Fallo en chunk [{start_index}:{end_index}] intento {attempt}. Fallback a individual.")
-                # ... (Lógica de fallback individual) ...
-                success = True # Marcar como éxito después del fallback para avanzar
+                standard_price = float(str(row.get('standard_price', 0)).replace(',', '.') or 0)
+            except: pass
+            try:
+                list_price = float(str(row.get('list_price', 0)).replace(',', '.') or 0)
+            except: pass
+            
+            vals = {
+                'name': str(row['name']).strip(),
+                'description': clean_description,
+                'type': product_type,
+                'default_code': str(row.get('default_code','')).strip() or False,
+                'barcode': str(row.get('barcode','')).strip() or False,
+                'standard_price': standard_price,
+                'list_price': list_price,
+                'purchase_ok': purchase_ok,
+                'sale_ok': sale_ok,
+                'available_in_pos': parse_boolean(row.get('available_in_pos')),
+                'purchase_method': str(row.get('purchase_method', 'purchase')).strip(),
+                'invoice_policy': 'delivery' if sale_ok else 'order',
+            }
 
+            # Asignación de Impuestos (Lógica Separada)
+            if has_value(row.get(COL_IMPUESTOS)):
+                csv_tax_cell = str(row[COL_IMPUESTOS]).strip()
+                tax_ids = find_tax_ids_for_csv_value(csv_tax_cell)
+                
+                if tax_ids:
+                    # 1. IMPUESTO DE COMPRA: Lo asignamos para el CREATE inicial (el que SÍ funciona)
+                    if purchase_ok:
+                        vals['supplier_taxes_id'] = [(6, 0, tax_ids)]
+                        
+                    # 2. IMPUESTO DE VENTA: NO lo asignamos en el CREATE. Guardamos el enlace para la FASE 3b
+                    if sale_ok:
+                        # Guardamos el índice del producto (que es el tamaño actual de products_to_create) y el ID de los impuestos de venta a asignar
+                        sales_tax_links.append((len(products_to_create), tax_ids)) 
+                else:
+                    logging.warning(f"Fila {idx} - Impuesto(s) '{csv_tax_cell}' no encontrado(s). Se omiten impuestos para este producto.")
+
+
+            # Categ (Usa clave normalizada)
+            if has_value(row.get(COL_CATEGORIA)):
+                cat_name_key = normalize_key(row[COL_CATEGORIA])
+                if cat_name_key in categories_cache:
+                    vals['categ_id'] = categories_cache[cat_name_key]
+                else:
+                    logging.warning(f"Fila {idx} - Categoría '{row[COL_CATEGORIA].strip()}' no encontrada en caché. Se salta producto.")
+                    continue
+
+            # Marca (Usa clave normalizada)
+            if has_value(row.get(COL_MARCA)):
+                brand_name_key = normalize_key(row[COL_MARCA])
+                if brand_name_key in brands_cache:
+                    vals['product_brand_id'] = brands_cache[brand_name_key]
+
+            # POS category (Usa clave normalizada)
+            if has_value(row.get(COL_CATEGORIA_POS)):
+                pos_cat_name_key = normalize_key(row[COL_CATEGORIA_POS])
+                if pos_cat_name_key in pos_categories_cache:
+                    vals['pos_categ_id'] = pos_categories_cache[pos_cat_name_key]
+
+            if 'categ_id' not in vals:
+                logging.error(f"Fila {idx} - ERROR CRÍTICO: No se pudo asignar 'categ_id'. Se salta producto.")
+                continue
+
+            products_to_create.append(vals)
+
+            if has_value(row.get(COL_PROVEEDOR)):
+                supplier_name = str(row[COL_PROVEEDOR]).strip()
+                supplier_links.append((len(products_to_create) - 1, normalize_key(supplier_name)))
+
+        except Exception as e:
+            logging.error(f"Fila {idx} - Error procesando: {e}\n{traceback.format_exc()}")
+
+# Creación en lotes
+created_ids = []
+if products_to_create:
+    print(f"📦 Creando {len(products_to_create)} productos en Odoo...")
+    for i in range(0, len(products_to_create), DEFAULT_CHUNK_SIZE):
+        chunk = products_to_create[i:i + DEFAULT_CHUNK_SIZE]
+        for attempt in range(MAX_RETRIES):
+            try:
+                ids = models.execute_kw(db, uid, password, 'product.template', 'create', [chunk])
+                created_ids.extend(ids)
+                time.sleep(SLEEP_BETWEEN_CHUNKS)
+                break
             except Exception as e:
-                logging.error(f"Error inesperado creando chunk [{start_index}:{end_index}] intento {attempt}: {e}")
-                if attempt == MAX_RETRIES:
-                    with open(error_log_path, "a", encoding="utf-8") as log:
-                        log.write(f"Fallo persistente registro(s): {chunk}\n")
-                    success = True
+                logging.error(f"Fallo creando chunk [{i}:{i+len(chunk)}] (Intento {attempt + 1}/{MAX_RETRIES}): {e}")
+                if attempt == MAX_RETRIES - 1:
+                    print(f"❌ Fallo persistente creando chunk de productos [{i}:{i+len(chunk)}]. Revisar '{error_log_path}'")
+                time.sleep(1 + attempt)
 
-        start_index = end_index
+# ----------------------------------------------------
+## FASE 3: ASIGNACIÓN OPTIMIZADA DE PROVEEDORES
+# ----------------------------------------------------
+print("\n--- FASE 3: ASIGNACIÓN OPTIMIZADA DE PROVEEDORES ---")
 
-    logging.info(f"Creación de productos finalizada. Total creados: {len(created_ids_global)}")
-
-# ---------- 🌟 SUPPLIERINFO (Asignación de proveedores con Feedback y Sleep) 🌟 ----------
-def bulk_update_or_create_supplierinfo(supplier_links, created_ids_map):
-    print("\n[INFO] Iniciando asignación de proveedores (Puede tomar tiempo debido a búsquedas individuales).")
-    logging.info(f"Iniciando asignación de {len(supplier_links)} proveedores...")
+if supplier_links and created_ids:
+    product_idx_to_id_map = {i: id for i, id in enumerate(created_ids)}
+    all_product_ids = list(product_idx_to_id_map.values())
     
-    supplier_info_to_create = []
-    SUPPLIER_REPORT_INTERVAL = 100 # Nuevo: Reportar cada 100 enlaces
+    valid_partner_names = set(link[1] for link in supplier_links)
+    valid_partner_ids = [partners_cache[name] for name in valid_partner_names if name in partners_cache]
 
-    for i, (idx, partner_name) in enumerate(supplier_links, start=1):
-        
-        # 🌟 Reporte de Progreso 🌟
-        if i % SUPPLIER_REPORT_INTERVAL == 0:
-            elapsed = time.time() - start_time
-            print(f"[SUPPLIER INFO] Procesados {i}/{len(supplier_links)} enlaces. Tiempo: {elapsed:.2f}s")
-        
-        # Obtener IDs
-        product_tmpl_id = created_ids_map.get(idx)
-        partner_id = partners_cache.get(partner_name) 
+    existing_rels_raw = models.execute_kw(db, uid, password, 'product.supplierinfo', 'search_read',
+        [[('product_tmpl_id', 'in', all_product_ids), ('name', 'in', valid_partner_ids)]],
+        {'fields': ['product_tmpl_id', 'name']})
 
-        if not product_tmpl_id or not partner_id: continue
+    existing_rels_set = {(rec['product_tmpl_id'][0], rec['name'][0]) for rec in existing_rels_raw}
 
-        # RPC individual inevitable: Búsqueda para evitar duplicados de product.supplierinfo
-        domain = [('product_tmpl_id', '=', product_tmpl_id), ('name', '=', partner_id)]
+    supplierinfo_to_create = []
+    for product_idx, partner_key in supplier_links:
+        product_id = product_idx_to_id_map.get(product_idx)
+        partner_id = partners_cache.get(partner_key) 
+
+        if product_id and partner_id and (product_id, partner_id) not in existing_rels_set:
+            supplierinfo_to_create.append({
+                'product_tmpl_id': product_id,
+                'name': partner_id
+            })
+
+    if supplierinfo_to_create:
         try:
-            existing = models.execute_kw(db, uid, password, 'product.supplierinfo', 'search', [domain], {'limit': 1})
-            if not existing:
-                supplier_info_to_create.append({'product_tmpl_id': product_tmpl_id, 'name': partner_id})
+            print(f"🔗 Creando {len(supplierinfo_to_create)} nuevas relaciones producto-proveedor...")
+            models.execute_kw(db, uid, password, 'product.supplierinfo', 'create', [supplierinfo_to_create])
+            print("    -> ✅ Relaciones creadas exitosamente.")
         except Exception as e:
-            logging.error(f"Error buscando supplierinfo para {product_tmpl_id}/{partner_name}: {e}")
+            logging.error(f"Fallo creando supplierinfo: {e}")
+            print(f"    -> ❌ Error creando relaciones: {e}")
 
-        # 🚨 NUEVO: Pequeño respiro para no saturar el servidor con búsquedas.
-        time.sleep(0.01)
-
-    # Creación en bulk
-    if supplier_info_to_create:
-        print(f"[INFO] Creando {len(supplier_info_to_create)} nuevas product.supplierinfo en bulk.")
-        try:
-            models.execute_kw(db, uid, password, 'product.supplierinfo', 'create', [supplier_info_to_create])
-            logging.info("Creación de supplierinfo por lotes completada.")
-        except Exception as e:
-            logging.error(f"Fallo el bulk create de supplierinfo: {e}. Fallback a individual.")
-            for vals in supplier_info_to_create:
-                try:
-                    models.execute_kw(db, uid, password, 'product.supplierinfo', 'create', [vals])
-                except Exception as e_indiv:
-                    logging.error(f"Fallo creando supplierinfo individual {vals}: {e_indiv}")
-    
-    print("[INFO] Asignación de proveedores finalizada.")
-
-# Mapeo de índice a ID real
-created_ids_map = {i: id for i, id in enumerate(created_ids_global)}
-bulk_update_or_create_supplierinfo(supplier_links, created_ids_map)
+# ----------------------------------------------------
+# FINAL
+# ----------------------------------------------------
 
 
 end_time = time.time()
-elapsed_time = end_time - start_time
-
 print("\n" + "="*70)
-print("Importación BULK ULTRA (V4.0 - ESTABLE) completada")
-print(f"Total filas CSV: {total}, Éxitosos: {ok_count}, Fallidos: {fail_count}")
-print(f"Total productos CREADOS: {len(created_ids_global)}")
-print(f"Tiempo de ejecución total: {elapsed_time:.2f} segundos")
+print(f"🏁 Importación completada en {end_time - start_time:.2f} segundos")
+print(f"Total productos CREADOS: {len(created_ids)}")
 print("="*70)

@@ -1,2 +1,3 @@
-*** Para migrar los articulos repetidos el csv de articulos no debe tener código de barras repeditos.
+*** Para importar los articulos el csv de articulos no debe tener código de barras repeditos.
+
 *** En la carpeta Modelos CSV se deja las estructuras de los csv con sus campos utilizados para la importación.

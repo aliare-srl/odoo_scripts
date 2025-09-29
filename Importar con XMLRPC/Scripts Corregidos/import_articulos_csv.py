@@ -1,331 +1,298 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+"""
+Script BULK ULTRA de importación de artículos a Odoo 15 vía XML-RPC
+Lee: articulos.csv
+Genera log de errores: import_articulos_errors.txt
+"""
 
 import xmlrpc.client
 import csv
 import traceback
 import time
 import logging
-import sys
-import re
 
 # ---------- CONFIG ----------
-url = "http://localhost:8073"
+url = "http://localhost:8069"
 db = "test"
 username = "admin"
 password = "admin"
 
 csv_path = "articulos.csv"
-error_log_path = "import_articulos_errors.txt"
-
-COL_IMPUESTOS = 'taxes_id/id' 
-COL_PROVEEDOR = 'seller_ids'
-COL_CATEGORIA = 'categ_id'
-COL_MARCA = 'product_brand_id'
-COL_CATEGORIA_POS = 'pos_categ_id'
-
-TYPE_MAPPING = {
-    'almacenable': 'product',
-    'consumible': 'consu',
-    'servicio': 'service'
-}
-
-DEFAULT_CHUNK_SIZE = 200
-MAX_RETRIES = 3
-SLEEP_BETWEEN_CHUNKS = 0.2
-PROGRESS_REPORT_INTERVAL = 1000
+error_log_path = "import_log_articulos.txt"
 # -----------------------------
 
 start_time = time.time()
 
-logging.basicConfig(filename=error_log_path, level=logging.INFO,
-                    format="%(asctime)s - %(levelname)s - %(message)s")
+# Configuración de logs
+logging.basicConfig(
+    filename=error_log_path,
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
 
 # Conectar XML-RPC
-try:
-    common = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/common')
-    uid = common.authenticate(db, username, password, {})
-    if not uid:
-        raise Exception("Autenticación fallida.")
-    models = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/object')
-    print("✅ Conexión a Odoo exitosa.")
-except Exception as e:
-    print(f"❌ Error de conexión: {e}")
-    sys.exit(1)
+common = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/common')
+uid = common.authenticate(db, username, password, {})
+if not uid:
+    raise Exception("Autenticación fallida. Revisa url/db/usuario/contraseña")
+models = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/object')
 
-# ---------- CACHES ----------
-partners_cache = {}
+# ---------- CACHE ----------
 categories_cache = {}
-brands_cache = {}
 pos_categories_cache = {}
-taxes_normalized_cache = {}
+brands_cache = {}
+partners_cache = {}
+taxes_cache = {}
 
-# ---------- UTILS ----------
+# ---------- UTIL ----------
+def bool_from_value(v):
+    if v is None or str(v).strip() == "":
+        return False
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    return s in ("1", "true", "verdadero", "si", "sí", "y", "yes")
+
 def has_value(v):
     return v is not None and str(v).strip() != ""
 
-def parse_boolean(v):
-    s = str(v).strip().lower()
-    return s in ("1", "true", "verdadero", "si", "s", "y", "yes") if has_value(v) else False
+def search_or_create_category(cat_name, parent_id=False):
+    if not has_value(cat_name):
+        return False
+    key = (str(cat_name).strip(), parent_id)
+    if key in categories_cache:
+        return categories_cache[key]
+    domain = [['name', '=', str(cat_name).strip()]]
+    ids = models.execute_kw(db, uid, password, 'product.category', 'search', [domain], {'limit': 1})
+    if ids:
+        categories_cache[key] = ids[0]
+        return ids[0]
+    new_id = models.execute_kw(db, uid, password, 'product.category', 'create', [{'name': str(cat_name).strip(), **({'parent_id': parent_id} if parent_id else {})}])
+    categories_cache[key] = new_id
+    return new_id
 
-def normalize_key(s):
-    """Limpia la cadena para usarla como clave de caché: strip, upper, y cambia ',' por '.'"""
-    return str(s).strip().upper().replace(',', '.')
+def search_or_create_pos_category(name):
+    if not has_value(name):
+        return False
+    key = str(name).strip()
+    if key in pos_categories_cache:
+        return pos_categories_cache[key]
+    domain = [['name', '=', key]]
+    ids = models.execute_kw(db, uid, password, 'pos.category', 'search', [domain], {'limit': 1})
+    if ids:
+        pos_categories_cache[key] = ids[0]
+        return ids[0]
+    new_id = models.execute_kw(db, uid, password, 'pos.category', 'create', [{'name': key}])
+    pos_categories_cache[key] = new_id
+    return new_id
 
-def collect_unique_values_from_csv(column_name):
-    values = set()
-    try:
-        with open(csv_path, mode='r', newline='', encoding='utf-8', errors='replace') as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                if has_value(row.get(column_name)):
-                    values.add(str(row[column_name]).strip())
-    except FileNotFoundError:
-        print(f"❌ ERROR: No se encontró el archivo '{csv_path}'")
-        sys.exit(1)
-    return values
+def search_or_create_partner(name):
+    if not has_value(name):
+        return False
+    key = str(name).strip()
+    if key in partners_cache:
+        return partners_cache[key]
+    domain = [['name', '=', key]]
+    ids = models.execute_kw(db, uid, password, 'res.partner', 'search', [domain], {'limit': 1})
+    if ids:
+        partners_cache[key] = ids[0]
+        return ids[0]
+    new_id = models.execute_kw(db, uid, password, 'res.partner', 'create', [{'name': key, 'supplier_rank': 1}])
+    partners_cache[key] = new_id
+    return new_id
 
-def preload_or_create_entities(model, names_set, cache, extra_create_vals=None):
-    if not names_set:
+def find_tax_by_name(name):
+    if not has_value(name):
+        return []
+    key = str(name).strip()
+    if key in taxes_cache:
+        return taxes_cache[key]
+    ids = models.execute_kw(db, uid, password, 'account.tax', 'search', [[['name', '=', key]]])
+    taxes_cache[key] = ids
+    return ids
+
+def try_assign_brand(vals, brand_name):
+    if not has_value(brand_name):
         return
-    
-    names_list = list(names_set)
-    existing_records = models.execute_kw(db, uid, password, model, 'search_read',
-                                         [[['name', 'in', names_list]]], {'fields': ['id', 'name']})
-    
-    found_names = set()
-    for record in existing_records:
-        clean_name = str(record['name']).strip()
-        cache[normalize_key(clean_name)] = record['id']
-        found_names.add(clean_name)
-    
-    new_names_to_create = names_set - found_names
-    
-    if new_names_to_create:
-        sorted_new_names = sorted(list(new_names_to_create))
-        vals_to_create = []
-        base_vals = extra_create_vals or {}
-        for name in sorted_new_names:
-            vals = {'name': name}
-            vals.update(base_vals)
-            vals_to_create.append(vals)
-        try:
-            new_ids = models.execute_kw(db, uid, password, model, 'create', [vals_to_create])
-            if isinstance(new_ids, int): 
-                new_ids = [new_ids]
-            for i, name in enumerate(sorted_new_names):
-                if i < len(new_ids):
-                    cache[normalize_key(name)] = new_ids[i]
-        except Exception as e:
-            logging.error(f"Fallo en bulk create de '{model}': {e}")
-            
-# ----------------------------------------------------
-# FASE 1: PRECARGA IMPUESTOS Y ENTIDADES
-# ----------------------------------------------------
-print("\n--- FASE 1: PRECARGA TOTAL DE DATOS ---")
-
-taxes = models.execute_kw(db, uid, password, 'account.tax', 'search_read', [[]], {'fields': ['id', 'name']})
-for tax in taxes:
-    name = str(tax.get('name', '')).strip()
-    tax_id = tax.get('id')
-    taxes_normalized_cache[normalize_key(name)] = tax_id
-
-print(f"✅ Precargados {len(taxes_normalized_cache)} impuestos usando clave normalizada.")
-
-unique_partners = collect_unique_values_from_csv(COL_PROVEEDOR)
-unique_brands = collect_unique_values_from_csv(COL_MARCA)
-unique_categories = collect_unique_values_from_csv(COL_CATEGORIA)
-unique_pos_categories = collect_unique_values_from_csv(COL_CATEGORIA_POS)
-
-preload_or_create_entities('res.partner', unique_partners, partners_cache, {'supplier_rank': 1})
-preload_or_create_entities('product.brand', unique_brands, brands_cache)
-preload_or_create_entities('product.category', unique_categories, categories_cache)
-preload_or_create_entities('pos.category', unique_pos_categories, pos_categories_cache)
-
-# ----------------------------------------------------
-# FASE 2: PROCESAMIENTO Y CREACIÓN DE PRODUCTOS
-# ----------------------------------------------------
-print("\n--- FASE 2: PROCESAMIENTO Y CREACIÓN DE PRODUCTOS ---")
-
-products_to_create = []
-supplier_links = []
-sales_tax_links = [] # NUEVA LISTA para los IDs que necesitan actualizar el impuesto de venta
-
-def find_tax_ids_for_csv_value(csv_tax_value):
-    result_ids = []
-    if not has_value(csv_tax_value):
-        return result_ids
-        
-    parts = [p.strip() for p in re.split(r'[;,|]', csv_tax_value) if p.strip()] 
-    
-    for p in parts:
-        norm = normalize_key(p)
-        if norm in taxes_normalized_cache:
-            tax_id = taxes_normalized_cache[norm]
-            if tax_id not in result_ids:
-                result_ids.append(tax_id)
+    key = str(brand_name).strip()
+    if key in brands_cache:
+        vals['product_brand_id'] = brands_cache[key]
+        return
+    try:
+        brand_ids = models.execute_kw(db, uid, password, 'product.brand', 'search', [[['name', '=', key]]])
+        if brand_ids:
+            brands_cache[key] = brand_ids[0]
+            vals['product_brand_id'] = brand_ids[0]
         else:
-            logging.warning(f"Impuesto '{p}' (Normalizado: '{norm}') no encontrado en caché de Odoo. Se omite.")
+            new_brand_id = models.execute_kw(db, uid, password, 'product.brand', 'create', [{'name': key}])
+            brands_cache[key] = new_brand_id
+            vals['product_brand_id'] = new_brand_id
+    except Exception as e:
+        logging.error(f"Error asignando marca '{brand_name}': {e}")
+        logging.error(traceback.format_exc())
 
-    return result_ids
+def create_or_update_supplierinfo(product_tmpl_id, partner_id):
+    """Asocia un proveedor a un producto evitando duplicados"""
+    try:
+        domain = [
+            ('product_tmpl_id', '=', product_tmpl_id),
+            ('name', '=', partner_id)
+        ]
+        existing = models.execute_kw(
+            db, uid, password,
+            'product.supplierinfo', 'search',
+            [domain], {'limit': 1}
+        )
+        if existing:
+            return existing[0]
 
-with open(csv_path, mode='r', newline='', encoding='utf-8', errors='replace') as csvfile:
-    reader = csv.DictReader(csvfile)
-    for idx, row in enumerate(reader, start=1):
-        if idx % PROGRESS_REPORT_INTERVAL == 0:
-            print(f"[PROGRESO] Procesando fila {idx} del CSV...")
+        supplier_vals = {
+            'product_tmpl_id': product_tmpl_id,
+            'name': partner_id,
+        }
+        supplier_id = models.execute_kw(
+            db, uid, password,
+            'product.supplierinfo', 'create',
+            [supplier_vals]
+        )
+        return supplier_id
+    except Exception as e:
+        logging.error(f"Error asignando proveedor {partner_id} al producto {product_tmpl_id}: {e}")
+        logging.error(traceback.format_exc())
+        return None
 
-        try:
-            if not has_value(row.get('name')): continue
+# ---------- LEER CSV ----------
+try:
+    csvfile = open(csv_path, newline='', encoding='utf-8', errors='replace')
+except UnicodeDecodeError:
+    csvfile = open(csv_path, newline='', encoding='latin-1', errors='replace')
 
-            raw_type = str(row.get('detailed_type','')).strip().lower()
-            product_type = TYPE_MAPPING.get(raw_type, 'product')
-            raw_description = str(row.get('description','')).strip()
-            clean_description = raw_description.replace('<p>', '').replace('</p>', '').strip() or False
+reader = csv.DictReader(csvfile)
 
-            # Obtenemos los booleanos del CSV una sola vez
-            sale_ok = parse_boolean(row.get('sale_ok'))
-            purchase_ok = parse_boolean(row.get('purchase_ok'))
+with open(error_log_path, "w", encoding="utf-8") as log:
+    log.write("LOG BULK ULTRA DE IMPORTACIÓN DE PRODUCTOS (ERRORES)\n")
+    log.write("="*70 + "\n\n")
 
-            standard_price = 0
-            list_price = 0
-            try:
-                standard_price = float(str(row.get('standard_price', 0)).replace(',', '.') or 0)
-            except: pass
-            try:
-                list_price = float(str(row.get('list_price', 0)).replace(',', '.') or 0)
-            except: pass
-            
-            vals = {
-                'name': str(row['name']).strip(),
-                'description': clean_description,
-                'type': product_type,
-                'default_code': str(row.get('default_code','')).strip() or False,
-                'barcode': str(row.get('barcode','')).strip() or False,
-                'standard_price': standard_price,
-                'list_price': list_price,
-                'purchase_ok': purchase_ok,
-                'sale_ok': sale_ok,
-                'available_in_pos': parse_boolean(row.get('available_in_pos')),
-                'purchase_method': str(row.get('purchase_method', 'purchase')).strip(),
-                'invoice_policy': 'delivery' if sale_ok else 'order',
-            }
+total = 0
+ok_count = 0
+fail_count = 0
+new_products = []
+update_products = []
+supplier_links_new = []   # productos nuevos con proveedor
+supplier_links_exist = [] # productos existentes con proveedor
 
-            # Asignación de Impuestos (Lógica Separada)
-            if has_value(row.get(COL_IMPUESTOS)):
-                csv_tax_cell = str(row[COL_IMPUESTOS]).strip()
-                tax_ids = find_tax_ids_for_csv_value(csv_tax_cell)
-                
-                if tax_ids:
-                    # 1. IMPUESTO DE COMPRA: Lo asignamos para el CREATE inicial (el que SÍ funciona)
-                    if purchase_ok:
-                        vals['supplier_taxes_id'] = [(6, 0, tax_ids)]
-                        
-                    # 2. IMPUESTO DE VENTA: NO lo asignamos en el CREATE. Guardamos el enlace para la FASE 3b
-                    if sale_ok:
-                        # Guardamos el índice del producto (que es el tamaño actual de products_to_create) y el ID de los impuestos de venta a asignar
-                        sales_tax_links.append((len(products_to_create), tax_ids)) 
-                else:
-                    logging.warning(f"Fila {idx} - Impuesto(s) '{csv_tax_cell}' no encontrado(s). Se omiten impuestos para este producto.")
+for idx, row in enumerate(reader, start=1):
+    total += 1
+    try:
+        name = row.get('name')
+        if not has_value(name):
+            raise Exception("Falta el campo 'name'")
 
+        default_code = row.get('default_code')
+        barcode = row.get('barcode')
 
-            # Categ (Usa clave normalizada)
-            if has_value(row.get(COL_CATEGORIA)):
-                cat_name_key = normalize_key(row[COL_CATEGORIA])
-                if cat_name_key in categories_cache:
-                    vals['categ_id'] = categories_cache[cat_name_key]
-                else:
-                    logging.warning(f"Fila {idx} - Categoría '{row[COL_CATEGORIA].strip()}' no encontrada en caché. Se salta producto.")
-                    continue
+        domain = []
+        if has_value(default_code):
+            domain = [['default_code', '=', str(default_code).strip()]]
+        elif has_value(barcode):
+            domain = [['barcode', '=', str(barcode).strip()]]
 
-            # Marca (Usa clave normalizada)
-            if has_value(row.get(COL_MARCA)):
-                brand_name_key = normalize_key(row[COL_MARCA])
-                if brand_name_key in brands_cache:
-                    vals['product_brand_id'] = brands_cache[brand_name_key]
+        product_ids = models.execute_kw(db, uid, password, 'product.template', 'search', [domain], {'limit': 1}) if domain else []
+        product_tmpl_id = product_ids[0] if product_ids else False
 
-            # POS category (Usa clave normalizada)
-            if has_value(row.get(COL_CATEGORIA_POS)):
-                pos_cat_name_key = normalize_key(row[COL_CATEGORIA_POS])
-                if pos_cat_name_key in pos_categories_cache:
-                    vals['pos_categ_id'] = pos_categories_cache[pos_cat_name_key]
+        vals = {
+            'name': str(name).strip(),
+            'default_code': str(default_code).strip() if has_value(default_code) else False,
+            'barcode': str(barcode).strip() if has_value(barcode) else False,
+            'type': 'product',
+            'purchase_ok': bool_from_value(row.get('purchase_ok')),
+            'sale_ok': bool_from_value(row.get('sale_ok')),
+        }
+        
+        #Description
+        if has_value(row.get('description')):
+            vals['description'] = str(row['description']).strip()
 
-            if 'categ_id' not in vals:
-                logging.error(f"Fila {idx} - ERROR CRÍTICO: No se pudo asignar 'categ_id'. Se salta producto.")
-                continue
+        # Precios
+        for col in ['standard_price', 'list_price']:
+            if col in row and has_value(row[col]):
+                try:
+                    vals[col] = float(str(row[col]).replace(',', ''))
+                except:
+                    pass
 
-            products_to_create.append(vals)
+        # Categorías, POS, Taxes, Brand
+        if has_value(row.get('categ_id')):
+            vals['categ_id'] = search_or_create_category(row['categ_id'])
+        if has_value(row.get('pos_categ_id')):
+            vals['pos_categ_id'] = search_or_create_pos_category(row['pos_categ_id'])
+        if has_value(row.get('taxes_id/id')):
+            tax_ids = find_tax_by_name(row['taxes_id/id'])
+            if tax_ids:
+                vals['taxes_id'] = [(6, 0, tax_ids)]
+        try_assign_brand(vals, row.get('product_brand_id'))
+        if has_value(row.get('available_in_pos')):
+            vals['available_in_pos'] = bool_from_value(row.get('available_in_pos'))
 
-            if has_value(row.get(COL_PROVEEDOR)):
-                supplier_name = str(row[COL_PROVEEDOR]).strip()
-                supplier_links.append((len(products_to_create) - 1, normalize_key(supplier_name)))
+        if product_tmpl_id:
+            update_products.append((product_tmpl_id, vals))
+            if has_value(row.get('seller_ids')):
+                supplier_links_exist.append((product_tmpl_id, row.get('seller_ids')))
+        else:
+            new_products.append(vals)
+            if has_value(row.get('seller_ids')):
+                supplier_links_new.append((len(new_products)-1, row.get('seller_ids')))  # guardo índice del producto nuevo
 
-        except Exception as e:
-            logging.error(f"Fila {idx} - Error procesando: {e}\n{traceback.format_exc()}")
+        ok_count += 1
 
-# Creación en lotes
+    except Exception as e:
+        fail_count += 1
+        with open(error_log_path, "a", encoding="utf-8") as log:
+            log.write(f"Fila {idx} - Producto: {row.get('name')}\n")
+            log.write(f"Error: {str(e)}\n")
+            log.write(traceback.format_exc() + "\n")
+            log.write("-"*70 + "\n")
+
+csvfile.close()
+
+# ---------- BULK CREATE NUEVOS PRODUCTOS ----------
 created_ids = []
-if products_to_create:
-    print(f"📦 Creando {len(products_to_create)} productos en Odoo...")
-    for i in range(0, len(products_to_create), DEFAULT_CHUNK_SIZE):
-        chunk = products_to_create[i:i + DEFAULT_CHUNK_SIZE]
-        for attempt in range(MAX_RETRIES):
-            try:
-                ids = models.execute_kw(db, uid, password, 'product.template', 'create', [chunk])
-                created_ids.extend(ids)
-                time.sleep(SLEEP_BETWEEN_CHUNKS)
-                break
-            except Exception as e:
-                logging.error(f"Fallo creando chunk [{i}:{i+len(chunk)}] (Intento {attempt + 1}/{MAX_RETRIES}): {e}")
-                if attempt == MAX_RETRIES - 1:
-                    print(f"❌ Fallo persistente creando chunk de productos [{i}:{i+len(chunk)}]. Revisar '{error_log_path}'")
-                time.sleep(1 + attempt)
+if new_products:
+    created_ids = models.execute_kw(db, uid, password, 'product.template', 'create', [new_products])
+    if isinstance(created_ids, int):
+        created_ids = [created_ids]
 
-# ----------------------------------------------------
-## FASE 3: ASIGNACIÓN OPTIMIZADA DE PROVEEDORES
-# ----------------------------------------------------
-print("\n--- FASE 3: ASIGNACIÓN OPTIMIZADA DE PROVEEDORES ---")
+# ---------- BULK WRITE EXISTENTES ----------
+for product_id, vals in update_products:
+    models.execute_kw(db, uid, password, 'product.template', 'write', [[product_id], vals])
 
-if supplier_links and created_ids:
-    product_idx_to_id_map = {i: id for i, id in enumerate(created_ids)}
-    all_product_ids = list(product_idx_to_id_map.values())
-    
-    valid_partner_names = set(link[1] for link in supplier_links)
-    valid_partner_ids = [partners_cache[name] for name in valid_partner_names if name in partners_cache]
+# ---------- SUPPLIERINFO ----------
+# Proveedores productos existentes
+for product_tmpl_id, partner_name in supplier_links_exist:
+    try:
+        partner_id = search_or_create_partner(partner_name)
+        if partner_id:
+            create_or_update_supplierinfo(product_tmpl_id, partner_id)
+    except Exception as e:
+        logging.error(f"Error asignando proveedor '{partner_name}' al producto ID {product_tmpl_id}: {e}")
+        logging.error(traceback.format_exc())
 
-    existing_rels_raw = models.execute_kw(db, uid, password, 'product.supplierinfo', 'search_read',
-        [[('product_tmpl_id', 'in', all_product_ids), ('name', 'in', valid_partner_ids)]],
-        {'fields': ['product_tmpl_id', 'name']})
-
-    existing_rels_set = {(rec['product_tmpl_id'][0], rec['name'][0]) for rec in existing_rels_raw}
-
-    supplierinfo_to_create = []
-    for product_idx, partner_key in supplier_links:
-        product_id = product_idx_to_id_map.get(product_idx)
-        partner_id = partners_cache.get(partner_key) 
-
-        if product_id and partner_id and (product_id, partner_id) not in existing_rels_set:
-            supplierinfo_to_create.append({
-                'product_tmpl_id': product_id,
-                'name': partner_id
-            })
-
-    if supplierinfo_to_create:
+# Proveedores productos nuevos (mapear índice del new_products con created_ids)
+for idx_new, partner_name in supplier_links_new:
+    if idx_new < len(created_ids):
+        product_tmpl_id = created_ids[idx_new]
         try:
-            print(f"🔗 Creando {len(supplierinfo_to_create)} nuevas relaciones producto-proveedor...")
-            models.execute_kw(db, uid, password, 'product.supplierinfo', 'create', [supplierinfo_to_create])
-            print("    -> ✅ Relaciones creadas exitosamente.")
+            partner_id = search_or_create_partner(partner_name)
+            if partner_id:
+                create_or_update_supplierinfo(product_tmpl_id, partner_id)
         except Exception as e:
-            logging.error(f"Fallo creando supplierinfo: {e}")
-            print(f"    -> ❌ Error creando relaciones: {e}")
-
-# ----------------------------------------------------
-# FINAL
-# ----------------------------------------------------
-
+            logging.error(f"Error asignando proveedor '{partner_name}' al producto nuevo ID {product_tmpl_id}: {e}")
+            logging.error(traceback.format_exc())
 
 end_time = time.time()
-print("\n" + "="*70)
-print(f"🏁 Importación completada en {end_time - start_time:.2f} segundos")
-print(f"Total productos CREADOS: {len(created_ids)}")
-print("="*70)
+elapsed_time = end_time - start_time
+
+print("Importación BULK ULTRA completada")
+print(f"Total: {total}, Éxitosos: {ok_count}, Fallidos: {fail_count}")
+print(f"Log de errores: {error_log_path}")
+print(f"Tiempo de ejecución: {elapsed_time:.2f} segundos")

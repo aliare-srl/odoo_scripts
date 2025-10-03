@@ -1,3 +1,3 @@
-*** Para importar los articulos el csv de articulos no debe tener código de barras repeditos.
+*** Para importar los articulos el csv de articulos no debe tener código de barras repeditos. (AHORA EL SCRIPTS LO BLANQUEA)
 
 *** En la carpeta Modelos CSV se deja las estructuras de los csv con sus campos utilizados para la importación.

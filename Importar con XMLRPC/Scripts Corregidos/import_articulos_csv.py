@@ -1,298 +1,323 @@
 """
-Script BULK ULTRA de importación de artículos a Odoo 15 vía XML-RPC
-Lee: articulos.csv
-Genera log de errores: import_articulos_errors.txt
+Script BULK Optimizado Final con:
+- Barra de progreso
+- Estimación de tiempo
+- Impuestos cliente/proveedor corregido
+- purchase_method
+- Marca
+- Categoría POS
+- Proveedores
+- Creación/actualización en lotes
+- available_in_pos
+- description
 """
 
 import xmlrpc.client
 import csv
-import traceback
 import time
 import logging
+import sys
 
 # ---------- CONFIG ----------
-url = "http://localhost:8069"
+url = "http://localhost:8073"
 db = "test"
 username = "admin"
 password = "admin"
 
 csv_path = "articulos.csv"
-error_log_path = "import_log_articulos.txt"
-# -----------------------------
+log_path = "import_log_articulos.txt"
+
+logging.basicConfig(filename=log_path, level=logging.INFO, format='%(asctime)s - %(message)s')
+
+# ---------- CONEXIÓN ----------
+common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common")
+uid = common.authenticate(db, username, password, {})
+models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
 
 start_time = time.time()
 
-# Configuración de logs
-logging.basicConfig(
-    filename=error_log_path,
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+
+# ---------- UTILIDADES ----------
+def has_value(val):
+    return val is not None and str(val).strip() != ''
+
+
+def print_progress(current, total, start_time, prefix=''):
+    percent = current / total * 100
+    bar_len = 40
+    filled_len = int(bar_len * current // total)
+    bar = '=' * filled_len + '-' * (bar_len - filled_len)
+    elapsed = time.time() - start_time
+    remaining = (elapsed / current * (total - current)) if current else 0
+    sys.stdout.write(f"\r{prefix} |{bar}| {percent:5.1f}% Completado, ETA: {remaining:.1f}s")
+    sys.stdout.flush()
+    if current == total:
+        print('')
+
+
+# ---------- PRECARGA ----------
+print("Precargando datos de Odoo...")
+
+# Productos
+all_products = models.execute_kw(
+    db, uid, password,
+    'product.template', 'search_read',
+    [[]], {'fields': ['id', 'default_code', 'barcode']}
 )
+products_by_code = {p['default_code']: p['id'] for p in all_products if p.get('default_code')}
+products_by_barcode = {p['barcode']: p['id'] for p in all_products if p.get('barcode')}
 
+# Impuestos
+all_taxes = models.execute_kw(
+    db, uid, password,
+    'account.tax', 'search_read',
+    [[]], {'fields': ['id', 'name']}
+)
+# guardar como {name_stripped: id}
+taxes_cache = {t['name'].strip(): t['id'] for t in all_taxes if t.get('name')}
 
-# Conectar XML-RPC
-common = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/common')
-uid = common.authenticate(db, username, password, {})
-if not uid:
-    raise Exception("Autenticación fallida. Revisa url/db/usuario/contraseña")
-models = xmlrpc.client.ServerProxy(f'{url}/xmlrpc/2/object')
 
 # ---------- CACHE ----------
-categories_cache = {}
-pos_categories_cache = {}
-brands_cache = {}
-partners_cache = {}
 taxes_cache = {}
 
-# ---------- UTIL ----------
-def bool_from_value(v):
-    if v is None or str(v).strip() == "":
-        return False
-    if isinstance(v, bool):
-        return v
-    s = str(v).strip().lower()
-    return s in ("1", "true", "verdadero", "si", "sí", "y", "yes")
-
-def has_value(v):
-    return v is not None and str(v).strip() != ""
-
-def search_or_create_category(cat_name, parent_id=False):
-    if not has_value(cat_name):
-        return False
-    key = (str(cat_name).strip(), parent_id)
-    if key in categories_cache:
-        return categories_cache[key]
-    domain = [['name', '=', str(cat_name).strip()]]
-    ids = models.execute_kw(db, uid, password, 'product.category', 'search', [domain], {'limit': 1})
-    if ids:
-        categories_cache[key] = ids[0]
-        return ids[0]
-    new_id = models.execute_kw(db, uid, password, 'product.category', 'create', [{'name': str(cat_name).strip(), **({'parent_id': parent_id} if parent_id else {})}])
-    categories_cache[key] = new_id
-    return new_id
-
-def search_or_create_pos_category(name):
-    if not has_value(name):
-        return False
-    key = str(name).strip()
-    if key in pos_categories_cache:
-        return pos_categories_cache[key]
-    domain = [['name', '=', key]]
-    ids = models.execute_kw(db, uid, password, 'pos.category', 'search', [domain], {'limit': 1})
-    if ids:
-        pos_categories_cache[key] = ids[0]
-        return ids[0]
-    new_id = models.execute_kw(db, uid, password, 'pos.category', 'create', [{'name': key}])
-    pos_categories_cache[key] = new_id
-    return new_id
-
-def search_or_create_partner(name):
-    if not has_value(name):
-        return False
-    key = str(name).strip()
-    if key in partners_cache:
-        return partners_cache[key]
-    domain = [['name', '=', key]]
-    ids = models.execute_kw(db, uid, password, 'res.partner', 'search', [domain], {'limit': 1})
-    if ids:
-        partners_cache[key] = ids[0]
-        return ids[0]
-    new_id = models.execute_kw(db, uid, password, 'res.partner', 'create', [{'name': key, 'supplier_rank': 1}])
-    partners_cache[key] = new_id
-    return new_id
-
 def find_tax_by_name(name):
+    """Busca impuestos por nombre exacto (ejemplo: IVA 21%)"""
     if not has_value(name):
         return []
     key = str(name).strip()
     if key in taxes_cache:
         return taxes_cache[key]
-    ids = models.execute_kw(db, uid, password, 'account.tax', 'search', [[['name', '=', key]]])
-    taxes_cache[key] = ids
-    return ids
+    try:
+        ids = models.execute_kw(
+            db, uid, password,
+            'account.tax', 'search',
+            [[['name', '=', key]]]
+        )
+        taxes_cache[key] = ids
+        return ids
+    except Exception as e:
+        logging.error(f"Error buscando impuesto '{name}': {e}")
+        return []
+
+
+
+# Categorías
+all_categs = models.execute_kw(
+    db, uid, password,
+    'product.category', 'search_read',
+    [[]], {'fields': ['id', 'name']}
+)
+categs_cache = {c['name'].strip().lower(): c['id'] for c in all_categs if c.get('name')}
+
+
+def get_categ_id(name):
+    if not has_value(name):
+        return False
+    return categs_cache.get(name.strip().lower(), False)
+
+
+# Categorías POS
+all_pos_categs = models.execute_kw(
+    db, uid, password,
+    'pos.category', 'search_read',
+    [[]], {'fields': ['id', 'name']}
+)
+pos_categ_cache = {c['name'].strip().lower(): c['id'] for c in all_pos_categs if c.get('name')}
+
+
+def get_pos_categ_id(name):
+    if not has_value(name):
+        return False
+    return pos_categ_cache.get(name.strip().lower(), False)
+
+
+# Marcas
+brands_cache = {}
+
 
 def try_assign_brand(vals, brand_name):
     if not has_value(brand_name):
         return
-    key = str(brand_name).strip()
+    key = brand_name.strip().lower()
     if key in brands_cache:
         vals['product_brand_id'] = brands_cache[key]
         return
-    try:
-        brand_ids = models.execute_kw(db, uid, password, 'product.brand', 'search', [[['name', '=', key]]])
-        if brand_ids:
-            brands_cache[key] = brand_ids[0]
-            vals['product_brand_id'] = brand_ids[0]
-        else:
-            new_brand_id = models.execute_kw(db, uid, password, 'product.brand', 'create', [{'name': key}])
-            brands_cache[key] = new_brand_id
-            vals['product_brand_id'] = new_brand_id
-    except Exception as e:
-        logging.error(f"Error asignando marca '{brand_name}': {e}")
-        logging.error(traceback.format_exc())
+    brand_ids = models.execute_kw(db, uid, password, 'product.brand', 'search', [[['name', '=', brand_name]]])
+    if brand_ids:
+        brands_cache[key] = brand_ids[0]
+        vals['product_brand_id'] = brand_ids[0]
+    else:
+        new_brand_id = models.execute_kw(db, uid, password, 'product.brand', 'create', [{'name': brand_name}])
+        brands_cache[key] = new_brand_id
+        vals['product_brand_id'] = new_brand_id
+
+
+# Partners cache para proveedores
+partners_cache = {}
+
+
+def search_or_create_partner(name):
+    key = name.strip().lower()
+    if key in partners_cache:
+        return partners_cache[key]
+    ids = models.execute_kw(db, uid, password, 'res.partner', 'search', [[['name', '=', name]]], {'limit': 1})
+    if ids:
+        partners_cache[key] = ids[0]
+        return ids[0]
+    new_id = models.execute_kw(db, uid, password, 'res.partner', 'create', [{'name': name, 'supplier_rank': 1}])
+    partners_cache[key] = new_id
+    return new_id
+
 
 def create_or_update_supplierinfo(product_tmpl_id, partner_id):
-    """Asocia un proveedor a un producto evitando duplicados"""
-    try:
-        domain = [
-            ('product_tmpl_id', '=', product_tmpl_id),
-            ('name', '=', partner_id)
-        ]
-        existing = models.execute_kw(
-            db, uid, password,
-            'product.supplierinfo', 'search',
-            [domain], {'limit': 1}
-        )
-        if existing:
-            return existing[0]
+    domain = [('product_tmpl_id', '=', product_tmpl_id), ('name', '=', partner_id)]
+    existing = models.execute_kw(db, uid, password, 'product.supplierinfo', 'search', [domain], {'limit': 1})
+    if existing:
+        return existing[0]
+    return models.execute_kw(
+        db, uid, password,
+        'product.supplierinfo', 'create',
+        [{'product_tmpl_id': product_tmpl_id, 'name': partner_id}]
+    )
 
-        supplier_vals = {
-            'product_tmpl_id': product_tmpl_id,
-            'name': partner_id,
-        }
-        supplier_id = models.execute_kw(
-            db, uid, password,
-            'product.supplierinfo', 'create',
-            [supplier_vals]
-        )
-        return supplier_id
-    except Exception as e:
-        logging.error(f"Error asignando proveedor {partner_id} al producto {product_tmpl_id}: {e}")
-        logging.error(traceback.format_exc())
-        return None
 
 # ---------- LEER CSV ----------
-try:
-    csvfile = open(csv_path, newline='', encoding='utf-8', errors='replace')
-except UnicodeDecodeError:
-    csvfile = open(csv_path, newline='', encoding='latin-1', errors='replace')
-
-reader = csv.DictReader(csvfile)
-
-with open(error_log_path, "w", encoding="utf-8") as log:
-    log.write("LOG BULK ULTRA DE IMPORTACIÓN DE PRODUCTOS (ERRORES)\n")
-    log.write("="*70 + "\n\n")
-
-total = 0
-ok_count = 0
-fail_count = 0
 new_products = []
-update_products = []
-supplier_links_new = []   # productos nuevos con proveedor
-supplier_links_exist = [] # productos existentes con proveedor
+updates = []
+csv_rows = []
 
-for idx, row in enumerate(reader, start=1):
-    total += 1
-    try:
-        name = row.get('name')
-        if not has_value(name):
-            raise Exception("Falta el campo 'name'")
+with open(csv_path, newline='', encoding='utf-8') as csvfile:
+    reader = list(csv.DictReader(csvfile))
+    total_rows = len(reader)
+    csv_start_time = time.time()
+    csv_rows = reader
 
+    for idx, row in enumerate(reader, start=1):
         default_code = row.get('default_code')
         barcode = row.get('barcode')
 
-        domain = []
-        if has_value(default_code):
-            domain = [['default_code', '=', str(default_code).strip()]]
-        elif has_value(barcode):
-            domain = [['barcode', '=', str(barcode).strip()]]
-
-        product_ids = models.execute_kw(db, uid, password, 'product.template', 'search', [domain], {'limit': 1}) if domain else []
-        product_tmpl_id = product_ids[0] if product_ids else False
+        product_tmpl_id = None
+        if has_value(default_code) and default_code in products_by_code:
+            product_tmpl_id = products_by_code[default_code]
+        elif has_value(barcode) and barcode in products_by_barcode:
+            product_tmpl_id = products_by_barcode[barcode]
 
         vals = {
-            'name': str(name).strip(),
-            'default_code': str(default_code).strip() if has_value(default_code) else False,
-            'barcode': str(barcode).strip() if has_value(barcode) else False,
-            'type': 'product',
-            'purchase_ok': bool_from_value(row.get('purchase_ok')),
-            'sale_ok': bool_from_value(row.get('sale_ok')),
+            'name': row.get('name') or 'SIN NOMBRE',
+            'default_code': default_code or False,
+            'barcode': barcode or False,
+            'type': row.get('type') or 'product',
+            'list_price': float(row['list_price']) if has_value(row.get('list_price')) else 0.0,
+            'standard_price': float(row['standard_price']) if has_value(row.get('standard_price')) else 0.0,
+            'purchase_ok': True,
+            'sale_ok': True,
+            'available_in_pos': True if str(row.get('available_in_pos')).strip().upper() == 'VERDADERO' else False,
+            'description': row.get('description') or '',
         }
-        
-        #Description
-        if has_value(row.get('description')):
-            vals['description'] = str(row['description']).strip()
 
-        # Precios
-        for col in ['standard_price', 'list_price']:
-            if col in row and has_value(row[col]):
-                try:
-                    vals[col] = float(str(row[col]).replace(',', ''))
-                except:
-                    pass
+        # purchase_method
+        if has_value(row.get('purchase_method')):
+            val = str(row['purchase_method']).strip().lower()
+            if val in ['purchase', 'receive']:
+                vals['purchase_method'] = val
 
-        # Categorías, POS, Taxes, Brand
+        # Categoría
         if has_value(row.get('categ_id')):
-            vals['categ_id'] = search_or_create_category(row['categ_id'])
+            cat_id = get_categ_id(row['categ_id'])
+            if cat_id:
+                vals['categ_id'] = cat_id
+
+        # Categoría POS
         if has_value(row.get('pos_categ_id')):
-            vals['pos_categ_id'] = search_or_create_pos_category(row['pos_categ_id'])
+            pos_id = get_pos_categ_id(row['pos_categ_id'])
+            if pos_id:
+                vals['pos_categ_id'] = pos_id
+
+        # Marca
+        try_assign_brand(vals, row.get('product_brand_id'))
+
+        # ---------- IMPUESTOS ----------
         if has_value(row.get('taxes_id/id')):
             tax_ids = find_tax_by_name(row['taxes_id/id'])
             if tax_ids:
-                vals['taxes_id'] = [(6, 0, tax_ids)]
-        try_assign_brand(vals, row.get('product_brand_id'))
-        if has_value(row.get('available_in_pos')):
-            vals['available_in_pos'] = bool_from_value(row.get('available_in_pos'))
+                vals['taxes_id'] = [(6, 0, tax_ids)]             # Cliente (ventas)
+                vals['supplier_taxes_id'] = [(6, 0, tax_ids)]    # Proveedor (compras)
+            else:
+                logging.info(f"Fila {idx}: impuesto '{row.get('taxes_id/id')}' NO encontrado en Odoo")
+
 
         if product_tmpl_id:
-            update_products.append((product_tmpl_id, vals))
-            if has_value(row.get('seller_ids')):
-                supplier_links_exist.append((product_tmpl_id, row.get('seller_ids')))
+            updates.append((product_tmpl_id, vals))
         else:
             new_products.append(vals)
-            if has_value(row.get('seller_ids')):
-                supplier_links_new.append((len(new_products)-1, row.get('seller_ids')))  # guardo índice del producto nuevo
 
-        ok_count += 1
+        # Barra de progreso CSV
+        if idx % max(1, total_rows // 50) == 0 or idx == total_rows:
+            print_progress(idx, total_rows, csv_start_time, prefix="Procesando CSV")
 
-    except Exception as e:
-        fail_count += 1
-        with open(error_log_path, "a", encoding="utf-8") as log:
-            log.write(f"Fila {idx} - Producto: {row.get('name')}\n")
-            log.write(f"Error: {str(e)}\n")
-            log.write(traceback.format_exc() + "\n")
-            log.write("-"*70 + "\n")
 
-csvfile.close()
-
-# ---------- BULK CREATE NUEVOS PRODUCTOS ----------
+# ---------- CREACIÓN ----------
+print(f"\nCreando {len(new_products)} productos nuevos...")
+create_start_time = time.time()
 created_ids = []
-if new_products:
-    created_ids = models.execute_kw(db, uid, password, 'product.template', 'create', [new_products])
-    if isinstance(created_ids, int):
-        created_ids = [created_ids]
+for i in range(0, len(new_products), 50):
+    batch = new_products[i:i+50]
+    batch_ids = models.execute_kw(db, uid, password, 'product.template', 'create', [batch])
+    if isinstance(batch_ids, int):
+        batch_ids = [batch_ids]
+    created_ids.extend(batch_ids)
+    print_progress(min(i+50, len(new_products)), len(new_products), create_start_time, prefix="Creación productos")
 
-# ---------- BULK WRITE EXISTENTES ----------
-for product_id, vals in update_products:
-    models.execute_kw(db, uid, password, 'product.template', 'write', [[product_id], vals])
 
-# ---------- SUPPLIERINFO ----------
-# Proveedores productos existentes
-for product_tmpl_id, partner_name in supplier_links_exist:
-    try:
-        partner_id = search_or_create_partner(partner_name)
-        if partner_id:
-            create_or_update_supplierinfo(product_tmpl_id, partner_id)
-    except Exception as e:
-        logging.error(f"Error asignando proveedor '{partner_name}' al producto ID {product_tmpl_id}: {e}")
-        logging.error(traceback.format_exc())
+# ---------- ACTUALIZACIÓN ----------
+print(f"\nActualizando {len(updates)} productos existentes...")
+update_start_time = time.time()
+for i in range(0, len(updates), 50):
+    batch = updates[i:i+50]
+    for pid, vals in batch:
+        models.execute_kw(db, uid, password, 'product.template', 'write', [[pid], vals])
+    print_progress(min(i+50, len(updates)), len(updates), update_start_time, prefix="Actualización productos")
 
-# Proveedores productos nuevos (mapear índice del new_products con created_ids)
-for idx_new, partner_name in supplier_links_new:
-    if idx_new < len(created_ids):
-        product_tmpl_id = created_ids[idx_new]
-        try:
-            partner_id = search_or_create_partner(partner_name)
-            if partner_id:
-                create_or_update_supplierinfo(product_tmpl_id, partner_id)
-        except Exception as e:
-            logging.error(f"Error asignando proveedor '{partner_name}' al producto nuevo ID {product_tmpl_id}: {e}")
-            logging.error(traceback.format_exc())
 
-end_time = time.time()
-elapsed_time = end_time - start_time
+# ---------- ASIGNAR PROVEEDORES ----------
+print("\nAsignando proveedores a los productos...")
 
-print("Importación BULK ULTRA completada")
-print(f"Total: {total}, Éxitosos: {ok_count}, Fallidos: {fail_count}")
-print(f"Log de errores: {error_log_path}")
-print(f"Tiempo de ejecución: {elapsed_time:.2f} segundos")
+# Productos nuevos
+new_start_time = time.time()
+total_new = len(created_ids)
+for idx, row in enumerate(csv_rows, start=1):
+    seller_name = row.get('seller_ids')
+    if has_value(seller_name) and (idx-1) < total_new:
+        partner_id = search_or_create_partner(seller_name)
+        product_tmpl_id = created_ids[idx-1]
+        create_or_update_supplierinfo(product_tmpl_id, partner_id)
+
+    if idx % max(1, total_new // 50 or 1) == 0 or idx == total_new:
+        print_progress(min(idx, total_new), total_new, new_start_time, prefix="Proveedores nuevos")
+
+# Productos existentes
+exist_start_time = time.time()
+total_exist = len(csv_rows)
+processed_exist = 0
+for idx, row in enumerate(csv_rows, start=1):
+    seller_name = row.get('seller_ids')
+    default_code = row.get('default_code')
+    barcode = row.get('barcode')
+    product_tmpl_id = None
+    if has_value(default_code) and default_code in products_by_code:
+        product_tmpl_id = products_by_code[default_code]
+    elif has_value(barcode) and barcode in products_by_barcode:
+        product_tmpl_id = products_by_barcode[barcode]
+
+    if product_tmpl_id and has_value(seller_name):
+        partner_id = search_or_create_partner(seller_name)
+        create_or_update_supplierinfo(product_tmpl_id, partner_id)
+        processed_exist += 1
+
+    if idx % max(1, total_exist // 50 or 1) == 0 or idx == total_exist:
+        print_progress(idx, total_exist, exist_start_time, prefix="Proveedores existentes")
+
+# ---------- FIN ----------
+elapsed = time.time() - start_time
+print(f"\nImportación finalizada en {elapsed:.2f} segundos")
+logging.info(f"Importación finalizada en {elapsed:.2f} segundos")

@@ -186,6 +186,8 @@ new_products = []
 updates = []
 csv_rows = []
 
+seen_barcodes = set()   # Para detectar duplicados
+
 with open(csv_path, newline='', encoding='utf-8') as csvfile:
     reader = list(csv.DictReader(csvfile))
     total_rows = len(reader)
@@ -196,6 +198,17 @@ with open(csv_path, newline='', encoding='utf-8') as csvfile:
         default_code = row.get('default_code')
         barcode = row.get('barcode')
 
+        # ---- Validar duplicados de código de barra ----
+        if has_value(barcode):
+            if barcode in seen_barcodes:
+                # Si ya existe en este CSV, lo dejamos en blanco
+                logging.info(f"Fila {idx}: código de barra duplicado '{barcode}', se deja en blanco")
+                barcode = ''
+                row['barcode'] = ''  # también se pisa en la fila
+            else:
+                seen_barcodes.add(barcode)
+
+        # Buscar si ya existe en Odoo
         product_tmpl_id = None
         if has_value(default_code) and default_code in products_by_code:
             product_tmpl_id = products_by_code[default_code]
@@ -205,7 +218,7 @@ with open(csv_path, newline='', encoding='utf-8') as csvfile:
         vals = {
             'name': row.get('name') or 'SIN NOMBRE',
             'default_code': default_code or False,
-            'barcode': barcode or False,
+            'barcode': barcode or False,   # ya limpio si estaba duplicado
             'type': row.get('type') or 'product',
             'list_price': float(row['list_price']) if has_value(row.get('list_price')) else 0.0,
             'standard_price': float(row['standard_price']) if has_value(row.get('standard_price')) else 0.0,
@@ -214,6 +227,7 @@ with open(csv_path, newline='', encoding='utf-8') as csvfile:
             'available_in_pos': True if str(row.get('available_in_pos')).strip().upper() == 'VERDADERO' else False,
             'description': row.get('description') or '',
         }
+
 
         # purchase_method
         if has_value(row.get('purchase_method')):
@@ -279,43 +293,75 @@ for i in range(0, len(updates), 50):
     print_progress(min(i+50, len(updates)), len(updates), update_start_time, prefix="Actualización productos")
 
 
-# ---------- ASIGNAR PROVEEDORES ----------
-print("\nAsignando proveedores a los productos...")
+# ---------- ASIGNAR PROVEEDORES OPTIMIZADO EN LOTES ----------
+print("\nAsignando proveedores a los productos (optimizado)...")
 
-# Productos nuevos
-new_start_time = time.time()
-total_new = len(created_ids)
+# 1️⃣ Precargar todos los nombres de proveedores únicos del CSV
+all_seller_names = {row['seller_ids'].strip() for row in csv_rows if has_value(row.get('seller_ids'))}
+seller_names = [name for name in all_seller_names if has_value(name)]
+print(f"Se detectaron {len(seller_names)} proveedores en el CSV...")
+
+# 2️⃣ Buscar en Odoo todos los partners existentes
+existing_partners = models.execute_kw(
+    db, uid, password,
+    'res.partner', 'search_read',
+    [[['name', 'in', seller_names]]],
+    {'fields': ['id', 'name']}
+)
+for partner in existing_partners:
+    partners_cache[partner['name'].strip().lower()] = partner['id']
+
+# 3️⃣ Crear en lote los partners que faltan
+to_create = [name for name in seller_names if name.strip().lower() not in partners_cache]
+if to_create:
+    batch_size = 100
+    for i in range(0, len(to_create), batch_size):
+        batch = [{'name': n, 'supplier_rank': 1} for n in to_create[i:i+batch_size]]
+        new_ids = models.execute_kw(db, uid, password, 'res.partner', 'create', [batch])
+        if isinstance(new_ids, int):
+            new_ids = [new_ids]
+        for name, pid in zip(to_create[i:i+batch_size], new_ids):
+            partners_cache[name.strip().lower()] = pid
+    print(f"Se crearon {len(to_create)} proveedores nuevos en Odoo.")
+
+# 4️⃣ Construir la lista completa de supplierinfo a crear
+supplierinfo_to_create = []
+
 for idx, row in enumerate(csv_rows, start=1):
     seller_name = row.get('seller_ids')
-    if has_value(seller_name) and (idx-1) < total_new:
-        partner_id = search_or_create_partner(seller_name)
-        product_tmpl_id = created_ids[idx-1]
-        create_or_update_supplierinfo(product_tmpl_id, partner_id)
+    if not has_value(seller_name):
+        continue
 
-    if idx % max(1, total_new // 50 or 1) == 0 or idx == total_new:
-        print_progress(min(idx, total_new), total_new, new_start_time, prefix="Proveedores nuevos")
+    # Determinar product_tmpl_id
+    if idx <= len(created_ids):
+        product_tmpl_id = created_ids[idx - 1]  # producto nuevo
+    else:
+        default_code = row.get('default_code')
+        barcode = row.get('barcode')
+        product_tmpl_id = None
+        if has_value(default_code) and default_code in products_by_code:
+            product_tmpl_id = products_by_code[default_code]
+        elif has_value(barcode) and barcode in products_by_barcode:
+            product_tmpl_id = products_by_barcode[barcode]
 
-# Productos existentes
-exist_start_time = time.time()
-total_exist = len(csv_rows)
-processed_exist = 0
-for idx, row in enumerate(csv_rows, start=1):
-    seller_name = row.get('seller_ids')
-    default_code = row.get('default_code')
-    barcode = row.get('barcode')
-    product_tmpl_id = None
-    if has_value(default_code) and default_code in products_by_code:
-        product_tmpl_id = products_by_code[default_code]
-    elif has_value(barcode) and barcode in products_by_barcode:
-        product_tmpl_id = products_by_barcode[barcode]
+    if not product_tmpl_id:
+        continue
 
-    if product_tmpl_id and has_value(seller_name):
-        partner_id = search_or_create_partner(seller_name)
-        create_or_update_supplierinfo(product_tmpl_id, partner_id)
-        processed_exist += 1
+    partner_id = partners_cache.get(seller_name.strip().lower())
+    if partner_id:
+        supplierinfo_to_create.append({
+            'product_tmpl_id': product_tmpl_id,
+            'name': partner_id
+        })
 
-    if idx % max(1, total_exist // 50 or 1) == 0 or idx == total_exist:
-        print_progress(idx, total_exist, exist_start_time, prefix="Proveedores existentes")
+print(f"Se van a crear {len(supplierinfo_to_create)} relaciones producto-proveedor...")
+
+# 5️⃣ Crear supplierinfo en lotes de 100
+batch_size = 100
+for i in range(0, len(supplierinfo_to_create), batch_size):
+    batch = supplierinfo_to_create[i:i+batch_size]
+    models.execute_kw(db, uid, password, 'product.supplierinfo', 'create', [batch])
+    print_progress(i+len(batch), len(supplierinfo_to_create), start_time, prefix="Proveedores")
 
 # ---------- FIN ----------
 elapsed = time.time() - start_time

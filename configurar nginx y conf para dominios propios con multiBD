@@ -65,6 +65,8 @@ En tu archivo odoo.conf ponés esto:
 proxy_mode = True
 dbfilter_from_header = True
 dbfilter = ^(petsfood|demo|test|motel)$
+o
+dbfilter = ^(%d|petsfood)$
 
 
 👉 Explicación:

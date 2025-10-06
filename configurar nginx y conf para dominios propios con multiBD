@@ -1,0 +1,91 @@
+Gracias por pasarme tu configuración, Mauricio. Te voy a indicar **exactamente dónde y cómo modificar tu Nginx** para que `petsfood.com.ar` funcione con su propio dominio sin romper los subdominios actuales (`demo.mochipa.com.ar`, `motel.mochipa.com.ar`, etc.).
+
+---
+
+### 🔹 Paso 1: Crear un nuevo `server` block para el dominio propio
+
+Actualmente tenés un `server` block principal que maneja varios subdominios de `mochipa.com.ar`. Lo que hay que hacer es **agregar un bloque separado para `petsfood.com.ar`**, así:
+
+
+server {
+    listen 80;
+    server_name petsfood.com.ar www.petsfood.com.ar;
+
+    location / {
+        proxy_pass http://127.0.0.1:8073;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /longpolling {
+        proxy_pass http://127.0.0.1:8075;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    client_max_body_size 100M;
+
+    access_log /var/log/nginx/petsfood.access.log;
+    error_log /var/log/nginx/petsfood.error.log warn;
+}
+
+
+### 🔹 Paso 2: Configurar el dbfilter en Odoo
+
+* Abrí tu `odoo.conf`.
+* Actualmente tenés algo como:
+
+```ini
+dbfilter = ^%d$ ASI ANDA BIEN si el dominio tiene el mismo nombre de la BD
+```
+
+* Modificá para que también detecte `petsfood` por su dominio:
+
+```ini
+dbfilter = ^(petsfood|.*\.mochipa)$
+```
+
+* Explicación:
+
+  * `petsfood` → base de datos de Petsfood (debe llamarse exactamente `petsfood`).
+  * `.*\.mochipa` → todos los subdominios existentes de tus otros clientes siguen funcionando.
+
+* Reiniciá Odoo después de cambiar:
+
+```bash
+sudo systemctl restart odoo
+```
+
+---
+
+### 🔹 Paso 3: Configurar SSL con Certbot
+
+Si querés que `petsfood.com.ar` tenga HTTPS:
+
+```bash
+sudo certbot --nginx -d petsfood.com.ar -d www.petsfood.com.ar
+```
+
+Esto genera los certificados y actualiza el `server block` automáticamente (después ajustá los logs si querés diferenciarlos).
+
+---
+
+### 🔹 Paso 4: Reiniciar Nginx
+
+```bash
+sudo nginx -t   # Verifica sintaxis
+sudo systemctl restart nginx
+```
+
+---
+
+Con esto:
+
+* Todos los subdominios de `mochipa.com.ar` siguen funcionando igual.
+* `petsfood.com.ar` apunta a la base `petsfood`.
+* Cada cliente puede ingresar con su dominio/subdominio sin conflictos.
+

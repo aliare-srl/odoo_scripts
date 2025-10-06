@@ -1,7 +1,3 @@
-Gracias por pasarme tu configuración, Mauricio. Te voy a indicar **exactamente dónde y cómo modificar tu Nginx** para que `petsfood.com.ar` funcione con su propio dominio sin romper los subdominios actuales (`demo.mochipa.com.ar`, `motel.mochipa.com.ar`, etc.).
-
----
-
 ### 🔹 Paso 1: Crear un nuevo `server` block para el dominio propio
 
 Actualmente tenés un `server` block principal que maneja varios subdominios de `mochipa.com.ar`. Lo que hay que hacer es **agregar un bloque separado para `petsfood.com.ar`**, así:
@@ -33,7 +29,7 @@ server {
     error_log /var/log/nginx/petsfood.error.log warn;
 }
 
-
+---------------------------------------
 ### 🔹 Paso 2: Configurar el dbfilter en Odoo
 
 * Abrí tu `odoo.conf`.
@@ -60,7 +56,26 @@ dbfilter = ^(petsfood|.*\.mochipa)$
 sudo systemctl restart odoo
 ```
 
----
+IMPORTANTE PARA EL CASO QUE EL DOMINIO NO COINCIDA CON EL NOMBRE DE BD
+Solución usando dbfilter_from_header
+
+En tu archivo odoo.conf ponés esto:
+
+[options]
+proxy_mode = True
+dbfilter_from_header = True
+dbfilter = ^(petsfood|demo|test|motel)$
+
+
+👉 Explicación:
+
+proxy_mode = True → necesario porque usás Nginx.
+
+dbfilter_from_header = True → hace que Odoo mire el dominio real que entra (Host).
+
+dbfilter = ^(petsfood|demo|test|motel)$ → lista explícita de las BDs que pueden abrirse.
+
+--------------------------
 
 ### 🔹 Paso 3: Configurar SSL con Certbot
 

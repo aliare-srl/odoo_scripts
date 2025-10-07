@@ -29,6 +29,16 @@ server {
     error_log /var/log/nginx/petsfood.error.log warn;
 }
 
+UNA VEZ CREADA LA ENTRADA EN SITE-AVAILABLE DE DEBE HABILITAR CON EL SIGUIENTE COMANDO
+sudo ln -s /etc/nginx/sites-available/petsfood.com.ar /etc/nginx/sites-enabled/
+
+Probar la configuración
+sudo nginx -t
+
+Si no da errores:
+sudo systemctl reload nginx
+
+
 ---------------------------------------
 ### 🔹 Paso 2: Configurar el dbfilter en Odoo
 

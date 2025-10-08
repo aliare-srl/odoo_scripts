@@ -1,8 +1,9 @@
 import xmlrpc.client
 import csv
-import logging
 import re
 import time
+import sys
+import logging
 
 # ---------------------------
 # CONFIGURACIÓN
@@ -19,11 +20,7 @@ batch_size = 50
 # ---------------------------
 # LOGGING
 # ---------------------------
-logging.basicConfig(
-    filename=log_file,
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(filename=log_file, level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # ---------------------------
 # CONEXIÓN ODOO
@@ -33,26 +30,26 @@ uid = common.authenticate(db, username, password, {})
 models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
 
 if not uid:
-    logging.error("Error de autenticación en Odoo.")
+    print("❌ Error de autenticación en Odoo")
     raise Exception("No se pudo autenticar en Odoo")
 
 def execute_kw(model, method, args, kwargs=None):
     return models.execute_kw(db, uid, password, model, method, args, kwargs or {})
 
 # ---------------------------
-# FUNCIONES DE VALIDACIÓN
+# FUNCIONES
 # ---------------------------
 def validar_cuit(cuit):
     if not cuit or not cuit.isdigit():
         return False
-    if len(cuit) == 11:  # CUIT
+    if len(cuit) == 11:
         mult = [5,4,3,2,7,6,5,4,3,2]
         suma = sum([int(cuit[i])*mult[i] for i in range(10)])
         dv = 11 - (suma % 11)
         if dv == 11: dv = 0
         if dv == 10: dv = 9
         return dv == int(cuit[10])
-    elif len(cuit) == 8:  # DNI
+    elif len(cuit) == 8:
         return True
     return False
 
@@ -70,9 +67,22 @@ def corregir_cuit(cuit):
         return cuit
     return None
 
+def print_progress(current, total, start_time, prefix=''):
+    percent = current / total * 100
+    bar_len = 40
+    filled_len = int(bar_len * current // total)
+    bar = '=' * filled_len + '-' * (bar_len - filled_len)
+    elapsed = time.time() - start_time
+    remaining = (elapsed / current * (total - current)) if current else 0
+    sys.stdout.write(f"\r{prefix} |{bar}| {percent:5.1f}% Completado, ETA: {remaining:.1f}s")
+    sys.stdout.flush()
+    if current == total:
+        print('')
+
 # ---------------------------
-# MAPAS PRECALCULADOS
+# PRECARGA
 # ---------------------------
+print("Precargando datos de Odoo...")
 id_types = execute_kw("l10n_latam.identification.type", "search_read", [[]], {"fields": ["id", "name"]})
 id_type_map = {rec["name"].replace(" ", "").upper(): rec["id"] for rec in id_types}
 
@@ -84,22 +94,23 @@ existing_names = {p["name"].strip().upper() for p in existing_partners if p.get(
 existing_vats = {p["vat"] for p in existing_partners if p.get("vat")}
 
 # ---------------------------
-# LECTURA DEL CSV
+# LECTURA CSV
 # ---------------------------
-csvfile = open(csv_file, newline='', encoding='utf-8', errors='replace')
-reader = csv.DictReader(csvfile)
+with open(csv_file, newline='', encoding='utf-8', errors='replace') as csvfile:
+    reader = list(csv.DictReader(csvfile))
+    total_rows = len(reader)
 
 # ---------------------------
-# IMPORTACIÓN BULK
+# IMPORTACIÓN
 # ---------------------------
 batch_vals = []
 ok_count = 0
 fail_count = 0
+errors = []
 
-start_total = time.time()  # inicio tiempo total
+start_total = time.time()
 
 for index, row in enumerate(reader, start=1):
-    start_batch = time.time()  # inicio tiempo fila
     try:
         name = str(row.get("name") or "").strip()
         street = str(row.get("street") or "").strip()
@@ -109,25 +120,20 @@ for index, row in enumerate(reader, start=1):
         id_type_name = str(row.get("l10n_latam_identification_type_id/name") or "").strip().upper()
         id_type_id = id_type_map.get(id_type_name.replace(" ", "")) if id_type_name else None
 
-        vat = re.sub(r'\D', '', str(row.get("vat") or ""))  # solo números
+        vat = re.sub(r'\D', '', str(row.get("vat") or ""))
 
-        # ---------------------------
-        # Validar longitud según tipo
-        # ---------------------------
         if vat and id_type_name:
             if (id_type_name == "DNI" and len(vat) != 8) or (id_type_name == "CUIT" and len(vat) != 11):
-                logging.warning(f"Fila {index}: {id_type_name} inválido '{vat}', se omite VAT y l10n_latam_identification_type_id")
+                errors.append(f"Fila {index}: {id_type_name} inválido '{vat}' (omitido)")
                 vat = None
                 id_type_id = None
             else:
-                # Validar CUIT/DNI
                 if not validar_cuit(vat):
                     vat_corregido = corregir_cuit(vat)
                     if vat_corregido and validar_cuit(vat_corregido):
                         vat = vat_corregido
-                        logging.info(f"Fila {index}: CUIT/DNI corregido a {vat}")
                     else:
-                        logging.warning(f"Fila {index}: {id_type_name} inválido '{vat}', se omite l10n_latam_identification_type_id")
+                        errors.append(f"Fila {index}: {id_type_name} inválido '{vat}' (omitido)")
                         id_type_id = None
 
         afip_type_id = None
@@ -136,12 +142,12 @@ for index, row in enumerate(reader, start=1):
             afip_type_id = afip_map.get(afip_name)
 
         if not name:
-            logging.warning(f"Fila {index}: cliente vacío, saltado.")
+            errors.append(f"Fila {index}: cliente vacío, saltado")
             fail_count += 1
             continue
 
         if name.upper() in existing_names or (vat and vat in existing_vats):
-            logging.info(f"Fila {index}: cliente '{name}' ya existe, no se crea.")
+            errors.append(f"Fila {index}: cliente '{name}' ya existe, saltado")
             continue
 
         vals = {"name": name, "company_type": company_type}
@@ -168,30 +174,31 @@ for index, row in enumerate(reader, start=1):
         ok_count += 1
 
         if len(batch_vals) >= batch_size:
-            try:
-                created_ids = execute_kw("res.partner", "create", [batch_vals])
-                batch_time = time.time() - start_batch
-                logging.info(f"Batch de {len(batch_vals)} clientes creado en {batch_time:.2f} s. IDs: {created_ids}")
-            except Exception as e:
-                logging.error(f"Error al crear batch en fila {index}: {e}")
+            execute_kw("res.partner", "create", [batch_vals])
             batch_vals = []
-            time.sleep(1)
 
     except Exception as e:
-        logging.error(f"Fila {index}: error al importar '{row}': {e}")
+        error_msg = f"Fila {index}: error '{row.get('name', '')}' -> {e}"
+        errors.append(error_msg)
         fail_count += 1
 
+    # Barra de progreso
+    print_progress(index, total_rows, start_total, prefix="Importando clientes")
+
+# Crear último batch si quedó
 if batch_vals:
-    try:
-        created_ids = execute_kw("res.partner", "create", [batch_vals])
-        batch_time = time.time() - start_batch
-        logging.info(f"Último batch de {len(batch_vals)} clientes creado en {batch_time:.2f} s. IDs: {created_ids}")
-    except Exception as e:
-        logging.error(f"Error al crear último batch: {e}")
+    execute_kw("res.partner", "create", [batch_vals])
 
-csvfile.close()
+# ---------------------------
+# FIN
+# ---------------------------
 total_time = time.time() - start_total
+print(f"\n✅ Importación finalizada. Correctos: {ok_count}, Fallidos: {fail_count}")
+print(f"Tiempo total: {total_time:.2f} segundos")
 
-print(f"✅ Importación finalizada. Correctos: {ok_count}, Fallidos: {fail_count}")
-print(f"Tiempo total de importación: {total_time:.2f} segundos")
-print(f"Revisá el log: {log_file}")
+# Guardar log de errores
+if errors:
+    with open(log_file, 'w', encoding='utf-8') as f:
+        for err in errors:
+            f.write(err + "\n")
+    print(f"Errores registrados en: {log_file}")

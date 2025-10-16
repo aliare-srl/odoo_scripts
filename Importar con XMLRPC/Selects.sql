@@ -145,7 +145,7 @@ SELECT
     ISNULL(a.descripcion, '') AS name,
 
     -- Descripción en formato HTML
-    '<p>' + ISNULL(LTRIM(RTRIM(a.descripcion)), '') + '</p>' AS description,
+    '<p>' + ISNULL(LTRIM(RTRIM(a.desc_adicional)), '') + '</p>' AS description,
 
     -- Código de barras: solo si existe y es el último repetido
     CASE 
@@ -177,9 +177,9 @@ SELECT
     ISNULL(a.prec_vta, 0) AS list_price,
 
     -- Valores estáticos
-    'company' AS purchase_ok,
-    'company' AS sale_ok,
-    'company' AS available_in_pos,
+    'VERDADERO' AS purchase_ok,
+    'VERDADERO' AS sale_ok,
+    'VERDADERO' AS available_in_pos,
 
     -- Marca
     ISNULL(m.descmarca, '') AS product_brand_id,
@@ -192,8 +192,8 @@ SELECT
     ISNULL(r.descr, 'SIN CATEGORIA') AS pos_categ_id,
 
     -- Valores estáticos adicionales
-    'company' AS detailed_type,
-    'company' AS purchase_method
+    'Almacenable' AS detailed_type,
+    'purchase' AS purchase_method
 
 FROM articulos a
 LEFT JOIN marcas m ON a.idmarca = m.idmarca
@@ -204,5 +204,40 @@ WHERE a.inhabilitado = 0
   AND LTRIM(RTRIM(a.descripcion)) <> ''
 
 
+
+
+
+
+
+-- Select lista de precios
+
+SELECT descripcion_lista FROM LISTA_de_precios
+
+
+
+-- Select de lista de precios DIFERIDA
+
+DECLARE @id_lista INT;
+SET @id_lista = 2; -- Ponemos el id_lista que queremos en nuestro select
+
+SELECT
+    lp.descripcion_lista,
+    a.cod_barra,
+    la.precio_segun_lista
+FROM lista_articulos la
+INNER JOIN articulos a ON la.id_art = a.id_art
+INNER JOIN lista_de_precios lp ON la.id_lista = lp.id_lista
+WHERE la.id_lista = @id_lista
+-- Para que muestre solamente los cod de barra que estan establecidos y si esta repetido trae el ultimo
+  AND a.cod_barra IS NOT NULL
+  AND LTRIM(RTRIM(a.cod_barra)) <> ''
+  AND la.id_art = (
+      SELECT MAX(la2.id_art)
+      FROM lista_articulos la2
+      INNER JOIN articulos a2 ON la2.id_art = a2.id_art
+      WHERE la2.id_lista = la.id_lista
+        AND LTRIM(RTRIM(a2.cod_barra)) <> ''
+        AND a2.cod_barra = a.cod_barra
+  );
 
 

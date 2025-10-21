@@ -8,10 +8,10 @@ import logging
 # ---------------------------
 # CONFIGURACIÓN
 # ---------------------------
-url = "http://localhost:8073"
-db = "test"
-username = "admin"
-password = "admin"
+url = "http://localhost:8069"
+db = "albor"
+username = "desarrolloaliare@gmail.com"
+password = "ai102030abc"
 
 csv_file = "clientes.csv"
 log_file = "import_log_clientes.txt"
@@ -84,14 +84,17 @@ def print_progress(current, total, start_time, prefix=''):
 # ---------------------------
 print("Precargando datos de Odoo...")
 id_types = execute_kw("l10n_latam.identification.type", "search_read", [[]], {"fields": ["id", "name"]})
-id_type_map = {rec["name"].replace(" ", "").upper(): rec["id"] for rec in id_types}
+id_type_map = {}
+for rec in id_types:
+    key = rec["name"].replace(" ", "").upper()
+    if key not in id_type_map:
+        id_type_map[key] = rec["id"]
 
 afip_types = execute_kw("l10n_ar.afip.responsibility.type", "search_read", [[]], {"fields": ["id", "name"]})
 afip_map = {rec["name"].strip().upper(): rec["id"] for rec in afip_types}
 
-existing_partners = execute_kw("res.partner", "search_read", [[]], {"fields": ["name", "vat"]})
-existing_names = {p["name"].strip().upper() for p in existing_partners if p.get("name")}
-existing_vats = {p["vat"] for p in existing_partners if p.get("vat")}
+existing_partners = execute_kw("res.partner", "search_read", [[]], {"fields": ["id", "name", "vat"]})
+existing_map = {p["name"].strip().upper(): p["id"] for p in existing_partners if p.get("name")}
 
 # ---------------------------
 # LECTURA CSV
@@ -103,8 +106,8 @@ with open(csv_file, newline='', encoding='utf-8', errors='replace') as csvfile:
 # ---------------------------
 # IMPORTACIÓN
 # ---------------------------
-batch_vals = []
-ok_count = 0
+ok_creados = 0
+ok_actualizados = 0
 fail_count = 0
 errors = []
 
@@ -119,6 +122,8 @@ for index, row in enumerate(reader, start=1):
 
         id_type_name = str(row.get("l10n_latam_identification_type_id/name") or "").strip().upper()
         id_type_id = id_type_map.get(id_type_name.replace(" ", "")) if id_type_name else None
+        if isinstance(id_type_id, list):
+            id_type_id = id_type_id[0]
 
         vat = re.sub(r'\D', '', str(row.get("vat") or ""))
 
@@ -146,10 +151,6 @@ for index, row in enumerate(reader, start=1):
             fail_count += 1
             continue
 
-        if name.upper() in existing_names or (vat and vat in existing_vats):
-            errors.append(f"Fila {index}: cliente '{name}' ya existe, saltado")
-            continue
-
         vals = {"name": name, "company_type": company_type}
 
         customer_rank = row.get("customer_rank")
@@ -170,33 +171,33 @@ for index, row in enumerate(reader, start=1):
         if afip_type_id:
             vals["l10n_ar_afip_responsibility_type_id"] = afip_type_id
 
-        batch_vals.append(vals)
-        ok_count += 1
-
-        if len(batch_vals) >= batch_size:
-            execute_kw("res.partner", "create", [batch_vals])
-            batch_vals = []
+        name_key = name.strip().upper()
+        if name_key in existing_map:
+            # 🔄 Actualizar cliente existente
+            partner_id = existing_map[name_key]
+            execute_kw("res.partner", "write", [[partner_id], vals])
+            ok_actualizados += 1
+        else:
+            # ➕ Crear nuevo cliente
+            execute_kw("res.partner", "create", [vals])
+            ok_creados += 1
+            existing_map[name_key] = True  # evitar duplicados posteriores
 
     except Exception as e:
         error_msg = f"Fila {index}: error '{row.get('name', '')}' -> {e}"
         errors.append(error_msg)
         fail_count += 1
 
-    # Barra de progreso
-    print_progress(index, total_rows, start_total, prefix="Importando clientes")
-
-# Crear último batch si quedó
-if batch_vals:
-    execute_kw("res.partner", "create", [batch_vals])
+    print_progress(index, total_rows, start_total, prefix="Procesando clientes")
 
 # ---------------------------
 # FIN
 # ---------------------------
 total_time = time.time() - start_total
-print(f"\n✅ Importación finalizada. Correctos: {ok_count}, Fallidos: {fail_count}")
+print(f"\n✅ Proceso finalizado.")
+print(f"Clientes creados: {ok_creados}, actualizados: {ok_actualizados}, fallidos: {fail_count}")
 print(f"Tiempo total: {total_time:.2f} segundos")
 
-# Guardar log de errores
 if errors:
     with open(log_file, 'w', encoding='utf-8') as f:
         for err in errors:

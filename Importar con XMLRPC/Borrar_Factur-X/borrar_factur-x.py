@@ -1,6 +1,7 @@
 import xmlrpc.client
 import math
 import time
+import sys
 
 # ---------------------------------------------------------
 # CONFIGURACIÓN
@@ -24,7 +25,7 @@ if not uid:
 models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
 
 # -------------------------------------------------------------------
-# BUSCAR SOLO IDs (lo más liviano posible)
+# BUSCAR SOLO IDs
 # -------------------------------------------------------------------
 domain = [("name", "ilike", "factur-x.xml")]
 
@@ -36,11 +37,21 @@ attachment_ids = models.execute_kw(
 )
 
 total = len(attachment_ids)
-print(f"Encontrados: {total} adjuntos factur-x.xml para eliminar.")
+print(f"Encontrados: {total} adjuntos factur-x.xml para eliminar.\n")
 
 if total == 0:
     print("Nada para borrar.")
     exit()
+
+# -------------------------------------------------------------------
+# FUNCIÓN: BARRA DE PROGRESO
+# -------------------------------------------------------------------
+def progress_bar(current, total, bar_length=40):
+    percent = current / total
+    completed = int(bar_length * percent)
+    bar = "█" * completed + "-" * (bar_length - completed)
+    sys.stdout.write(f"\r[{bar}] {percent*100:5.1f}%  ({current}/{total})")
+    sys.stdout.flush()
 
 # -------------------------------------------------------------------
 # BORRAR POR LOTES
@@ -55,7 +66,6 @@ for i in range(batches):
     end = start + BATCH_SIZE
     batch_ids = attachment_ids[start:end]
 
-    # ejecutar eliminación
     models.execute_kw(
         db, uid, password,
         "ir.attachment", "unlink",
@@ -64,13 +74,11 @@ for i in range(batches):
 
     deleted_total += len(batch_ids)
 
-    print(f"Lote {i+1}/{batches}: eliminados {len(batch_ids)} adjuntos. Total acumulado: {deleted_total}")
+    # actualizar progreso
+    progress_bar(deleted_total, total)
 
-    time.sleep(0.2)  # Pausa suave para evitar saturar el server
+    time.sleep(0.1)
 
-# -------------------------------------------------------------------
-# RESULTADO FINAL
-# -------------------------------------------------------------------
-print("\n=====================================================")
+print("\n\n=====================================================")
 print(f"Proceso completado. Total de adjuntos eliminados: {deleted_total}")
 print("=====================================================")

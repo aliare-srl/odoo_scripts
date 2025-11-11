@@ -10,7 +10,7 @@ db = "test"
 username = "admin"
 password = "admin"
 
-BATCH_SIZE = 500  # Ajustable: 200 / 500 / 1000
+BATCH_SIZE = 500  # Ajustable según la fuerza del servidor
 
 # -------------------------------------------------------------------
 # AUTENTICACIÓN
@@ -24,7 +24,7 @@ if not uid:
 models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
 
 # -------------------------------------------------------------------
-# BUSCAR SOLO IDs (rápido y liviano)
+# BUSCAR SOLO IDs (lo más liviano posible)
 # -------------------------------------------------------------------
 domain = [("name", "ilike", "factur-x.xml")]
 
@@ -32,11 +32,11 @@ attachment_ids = models.execute_kw(
     db, uid, password,
     "ir.attachment", "search",
     [domain],
-    {"limit": 0}  # devuelve todos los IDs sin cargar objetos
+    {"limit": 0}
 )
 
 total = len(attachment_ids)
-print(f"Encontrados: {total} adjuntos factur-x.xml")
+print(f"Encontrados: {total} adjuntos factur-x.xml para eliminar.")
 
 if total == 0:
     print("Nada para borrar.")
@@ -46,23 +46,31 @@ if total == 0:
 # BORRAR POR LOTES
 # -------------------------------------------------------------------
 batches = math.ceil(total / BATCH_SIZE)
+deleted_total = 0
 
-print(f"Eliminando en {batches} lotes de {BATCH_SIZE}...")
+print(f"Eliminando en {batches} lotes de hasta {BATCH_SIZE} registros cada uno...\n")
 
 for i in range(batches):
     start = i * BATCH_SIZE
     end = start + BATCH_SIZE
     batch_ids = attachment_ids[start:end]
 
-    print(f"Lote {i+1}/{batches} - IDs: {len(batch_ids)}")
-
+    # ejecutar eliminación
     models.execute_kw(
         db, uid, password,
         "ir.attachment", "unlink",
         [batch_ids]
     )
 
-    # Pausa leve para no saturar el server en instalaciones chicas
-    time.sleep(0.2)
+    deleted_total += len(batch_ids)
 
-print("Proceso completado.")
+    print(f"Lote {i+1}/{batches}: eliminados {len(batch_ids)} adjuntos. Total acumulado: {deleted_total}")
+
+    time.sleep(0.2)  # Pausa suave para evitar saturar el server
+
+# -------------------------------------------------------------------
+# RESULTADO FINAL
+# -------------------------------------------------------------------
+print("\n=====================================================")
+print(f"Proceso completado. Total de adjuntos eliminados: {deleted_total}")
+print("=====================================================")

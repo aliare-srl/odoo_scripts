@@ -8,9 +8,16 @@ import signal
 
 # --- 🔧 CONFIGURACIÓN SIN PASSWORD ---
 DB_NAME = "demo"                         # Nombre de tu BD Odoo
-DB_USER = "odoo"                         # Usuario de la BD 
 DB_HOST = "localhost"                    # Host de la BD
 DB_PORT = "5432"                         # Puerto de PostgreSQL
+
+# Rutas comunes del filestore de Odoo
+FILESTORE_PATHS = [
+    f"/var/lib/odoo/filestore/{DB_NAME}",
+    f"/home/odoo/.local/share/Odoo/filestore/{DB_NAME}", 
+    f"/opt/odoo/filestore/{DB_NAME}",
+    f"/home/odoo/odoo/filestore/{DB_NAME}",
+]
 
 # --- ⚡ CONFIGURACIÓN OPTIMIZADA ---
 BATCH_SIZE = 10000
@@ -26,46 +33,120 @@ stats = {
     'ejecutando': True
 }
 
-def ejecutar_sql_sin_password(comando_sql):
-    """Ejecuta SQL sin password usando diferentes métodos"""
-    métodos = [
-        # Método 1: Conectar directamente (si los permisos lo permiten)
-        lambda: subprocess.run([
-            'psql', '-h', DB_HOST, '-p', DB_PORT, '-U', DB_USER, '-d', DB_NAME,
-            '-t', '-A', '-c', comando_sql
-        ], capture_output=True, text=True, check=True),
+def ejecutar_sql_como_postgres(comando_sql):
+    """Ejecuta SQL como usuario postgres (sin password)"""
+    try:
+        comando = [
+            'sudo', '-u', 'postgres',
+            'psql', '-d', DB_NAME, '-t', '-A', '-c', comando_sql
+        ]
         
-        # Método 2: Usar sudo -u postgres
-        lambda: subprocess.run([
-            'sudo', '-u', 'postgres', 'psql', '-d', DB_NAME,
-            '-t', '-A', '-c', comando_sql
-        ], capture_output=True, text=True, check=True),
+        resultado = subprocess.run(comando, capture_output=True, text=True, check=True)
+        return resultado.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Error ejecutando SQL: {e.stderr.strip()}")
+        return None
+
+def encontrar_filestore():
+    """Encuentra la ruta del filestore"""
+    print("🔍 Buscando filestore...")
+    
+    for path in FILESTORE_PATHS:
+        if os.path.exists(path):
+            print(f"   ✅ Filestore encontrado: {path}")
+            return path
+    
+    # Búsqueda recursiva
+    try:
+        resultado = subprocess.run([
+            'find', '/var/lib', '/home', '/opt', '-name', 'filestore', '-type', 'd'
+        ], capture_output=True, text=True)
         
-        # Método 3: Conectar como postgres directamente
-        lambda: subprocess.run([
-            'psql', '-h', DB_HOST, '-p', DB_PORT, '-U', 'postgres', '-d', DB_NAME,
-            '-t', '-A', '-c', comando_sql
-        ], capture_output=True, text=True, check=True),
-    ]
+        if resultado.stdout:
+            paths = resultado.stdout.strip().split('\n')
+            for path in paths:
+                if path and DB_NAME in path:
+                    print(f"   ✅ Filestore encontrado: {path}")
+                    return path
+    except:
+        pass
     
-    for i, método in enumerate(métodos):
-        try:
-            resultado = método()
-            if i > 0:  # Si no fue el primer método, mostrar cuál funcionó
-                métodos_nombres = ["directo", "sudo postgres", "usuario postgres"]
-                print(f"   🔑 Conectado usando: {métodos_nombres[i]}")
-            return resultado.stdout.strip()
-        except subprocess.CalledProcessError as e:
-            if i == len(métodos) - 1:  # Último método falló
-                print(f"❌ Todos los métodos de conexión fallaron")
-                print(f"   Error: {e.stderr.strip()}")
-            continue
-        except FileNotFoundError:
-            print("❌ El comando 'psql' no está instalado.")
-            print("   💡 Instálalo con: sudo apt install postgresql-client")
-            return None
-    
+    print("   ❌ No se encontró el filestore")
     return None
+
+def obtener_rutas_archivos_filestore():
+    """Obtiene las rutas de los archivos en el filestore"""
+    filestore_path = encontrar_filestore()
+    if not filestore_path:
+        return []
+    
+    print("📁 Obteniendo rutas de archivos en el filestore...")
+    
+    # Obtener los store_fname de la base de datos
+    archivos_db = ejecutar_sql_como_postgres("""
+        SELECT store_fname FROM ir_attachment 
+        WHERE name ILIKE '%factur-x.xml%' 
+        AND store_fname IS NOT NULL
+    """)
+    
+    rutas_archivos = []
+    if archivos_db:
+        archivos = [fname.strip() for fname in archivos_db.split('\n') if fname.strip()]
+        for archivo in archivos:
+            ruta_completa = os.path.join(filestore_path, archivo)
+            if os.path.exists(ruta_completa):
+                rutas_archivos.append(ruta_completa)
+        
+        print(f"   📦 {len(rutas_archivos)} archivos encontrados en filestore")
+    else:
+        print("   ✅ No hay referencias a archivos en el filestore")
+    
+    return rutas_archivos
+
+def eliminar_archivos_filestore():
+    """Elimina los archivos físicos del filestore"""
+    print("🗑️  Eliminando archivos del filestore...")
+    
+    rutas_archivos = obtener_rutas_archivos_filestore()
+    if not rutas_archivos:
+        print("   ✅ No hay archivos para eliminar del filestore")
+        return 0
+    
+    eliminados = 0
+    for i, ruta_archivo in enumerate(rutas_archivos, 1):
+        try:
+            os.remove(ruta_archivo)
+            eliminados += 1
+            if i % 100 == 0:
+                print(f"   🔄 {i}/{len(rutas_archivos)} archivos eliminados...")
+        except Exception as e:
+            print(f"   ❌ Error eliminando {ruta_archivo}: {e}")
+    
+    print(f"   ✅ {eliminados} archivos eliminados del filestore")
+    return eliminados
+
+def preguntar_eliminacion_filestore():
+    """Pregunta si eliminar archivos del filestore"""
+    print(f"\n📁 ELIMINACIÓN DEL FILESTORE")
+    print("=" * 50)
+    print("¿Deseas eliminar también los archivos físicos del filestore?")
+    print()
+    print("📍 Los archivos se encuentran en:")
+    filestore_path = encontrar_filestore()
+    if filestore_path:
+        print(f"   {filestore_path}")
+    print()
+    print("✅ RECOMENDADO: Libera espacio en disco")
+    print("❌ PELIGROSO: No se puede deshacer")
+    print()
+    
+    respuesta = input("   ¿Eliminar archivos del filestore? (s/N): ").strip().lower()
+    
+    if respuesta in ['s', 'si', 'y', 'yes']:
+        return True
+    else:
+        print("   ⚠️  Eliminación del filestore omitida")
+        return False
 
 def mostrar_estadisticas():
     """Muestra estadísticas en tiempo real"""
@@ -84,25 +165,23 @@ def hilo_estadisticas():
         if stats['ejecutando']:
             mostrar_estadisticas()
 
-def preguntar_y_ejecutar_vacuum():
-    """PREGUNTA antes de ejecutar VACUUM"""
+def preguntar_vacuum():
+    """PREGUNTA si quiere ejecutar VACUUM"""
     print(f"\n🧹 VACUUM - RECUPERACIÓN DE ESPACIO")
-    print("-" * 40)
-    print("El VACUUM recupera espacio en disco y optimiza la BD")
-    print("¿Deseas ejecutar VACUUM ahora?")
-    print("   • ✅ RECOMENDADO: Libera espacio inmediatamente")
-    print("   • ⏰ Duración: 1-3 minutos")
-    print("   • 🔒 NO BLOQUEANTE: No afecta operaciones")
+    print("=" * 50)
+    print("¿Deseas ejecutar VACUUM para recuperar espacio en disco?")
+    print()
+    print("✅ BENEFICIOS:")
+    print("   • Libera espacio inmediatamente")
+    print("   • Optimiza el rendimiento de la BD")
+    print()
     
-    respuesta = input("\n   ¿Ejecutar VACUUM? (s/N): ").strip().lower()
+    respuesta = input("   ¿Ejecutar VACUUM? (s/N): ").strip().lower()
     
     if respuesta in ['s', 'si', 'y', 'yes']:
-        ejecutar_vacuum_optimizado()
         return True
     else:
         print("   ⚠️  VACUUM omitido")
-        print("   💡 Puedes ejecutarlo después con:")
-        print("      VACUUM; VACUUM ir_attachment; ANALYZE ir_attachment;")
         return False
 
 def ejecutar_vacuum_optimizado():
@@ -112,27 +191,18 @@ def ejecutar_vacuum_optimizado():
     comandos_vacuum = [
         "VACUUM;",
         "VACUUM ir_attachment;", 
-        "ANALYZE ir_attachment;"
     ]
     
-    nombres_vacuum = [
-        "VACUUM básico (rápido)",
-        "VACUUM en tabla ir_attachment", 
-        "ANALYZE para estadísticas"
-    ]
-    
-    for i, (comando, nombre) in enumerate(zip(comandos_vacuum, nombres_vacuum), 1):
-        print(f"   {i}. {nombre}...")
-        resultado = ejecutar_sql_sin_password(comando)
+    for i, comando in enumerate(comandos_vacuum, 1):
+        print(f"   {i}. Ejecutando...")
+        resultado = ejecutar_sql_como_postgres(comando)
         if resultado is not None:
             print(f"      ✅ Completado")
-        else:
-            print(f"      ⚠️  Error")
         time.sleep(1)
 
 def mostrar_espacio():
     """Muestra el espacio usado"""
-    espacio = ejecutar_sql_sin_password(f"""
+    espacio = ejecutar_sql_como_postgres(f"""
         SELECT pg_size_pretty(pg_database_size('{DB_NAME}'));
     """)
     
@@ -153,23 +223,11 @@ def diagnosticar_conexion():
         print("   ❌ psql no está instalado")
         return False
     
-    # Verificar servicio PostgreSQL
-    print("2. Verificando servicio PostgreSQL...")
-    try:
-        servicio = subprocess.run(["systemctl", "is-active", "postgresql"], capture_output=True, text=True)
-        if servicio.stdout.strip() == "active":
-            print("   ✅ Servicio PostgreSQL activo")
-        else:
-            print(f"   ⚠️  Servicio: {servicio.stdout.strip()}")
-    except:
-        print("   ⚠️  No se pudo verificar el servicio")
-    
     # Probar conexión
-    print("3. Probando conexión a PostgreSQL...")
-    version = ejecutar_sql_sin_password("SELECT version();")
+    print("2. Probando conexión a PostgreSQL...")
+    version = ejecutar_sql_como_postgres("SELECT version();")
     if version:
-        print("   ✅ Conexión exitosa")
-        print(f"   ℹ️  {version.split(chr(10))[0]}")
+        print("   ✅ Conexión exitosa como usuario postgres")
         return True
     else:
         print("   ❌ No se pudo conectar")
@@ -179,39 +237,40 @@ def listar_bases_datos():
     """Lista las bases de datos disponibles"""
     print("\n📊 Bases de datos disponibles:")
     
-    resultado = ejecutar_sql_sin_password("SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname;")
-    
-    if resultado:
-        bases = [bd.strip() for bd in resultado.split('\n') if bd.strip()]
-        for bd in bases:
-            if bd not in ['postgres', 'template0', 'template1']:
-                print(f"   📁 {bd}")
-        return bases
-    else:
+    try:
+        resultado = subprocess.run([
+            'sudo', '-u', 'postgres', 'psql',
+            '-c', "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname;"
+        ], capture_output=True, text=True, check=True)
+        
+        if resultado.stdout:
+            lineas = [line.strip() for line in resultado.stdout.split('\n') if line.strip()]
+            for linea in lineas:
+                if linea and not linea.startswith('(') and linea not in ['datname', '----------']:
+                    print(f"   📁 {linea}")
+    except:
         print("   ❌ No se pudieron listar las bases de datos")
-        return []
 
 def obtener_total_archivos():
     """Obtiene el total de archivos factur-x.xml"""
     print("📊 Contando archivos factur-x.xml...")
     
-    resultado = ejecutar_sql_sin_password("""
+    resultado = ejecutar_sql_como_postgres("""
         SELECT COUNT(*) FROM ir_attachment 
         WHERE name ILIKE '%factur-x.xml%'
     """)
     
     if resultado and resultado.isdigit():
         total = int(resultado)
-        print(f"   📦 {total:,} archivos encontrados")
+        print(f"   📦 {total:,} archivos encontrados en BD")
         return total
     else:
         print("   ❌ No se pudieron contar los archivos")
         return 0
 
-def eliminar_archivos_optimizado(total_archivos):
-    """Elimina archivos de forma optimizada"""
-    print(f"🗑️  Iniciando eliminación de {total_archivos:,} archivos...")
-    print(f"   ⚡ Lotes de {BATCH_SIZE:,} | Pausa: {SLEEP_BETWEEN_BATCHES}s")
+def eliminar_archivos_bd_optimizado(total_archivos):
+    """Elimina archivos de forma optimizada de la BD"""
+    print(f"🗑️  Eliminando {total_archivos:,} archivos de la BD...")
     
     # Iniciar estadísticas
     stats['inicio_tiempo'] = time.time()
@@ -228,7 +287,7 @@ def eliminar_archivos_optimizado(total_archivos):
     try:
         while eliminados_total < total_archivos and lote_numero <= MAX_BATCHES:
             # DELETE optimizado
-            resultado = ejecutar_sql_sin_password(f"""
+            resultado = ejecutar_sql_como_postgres(f"""
                 DELETE FROM ir_attachment 
                 WHERE id IN (
                     SELECT id FROM ir_attachment 
@@ -270,7 +329,7 @@ def eliminar_archivos_optimizado(total_archivos):
         stats['ejecutando'] = False
         time.sleep(1)
         
-        print(f"   ✅ Eliminados {eliminados_total:,} archivos")
+        print(f"   ✅ {eliminados_total:,} archivos eliminados de la BD")
         return eliminados_total
         
     except KeyboardInterrupt:
@@ -292,15 +351,10 @@ def cambiar_base_datos():
     cambiar = input("   ¿Cambiar de base de datos? (s/N): ").strip().lower()
     
     if cambiar in ['s', 'si', 'y', 'yes']:
-        bases = listar_bases_datos()
-        if bases:
-            nueva_bd = input("   📝 Nueva base de datos: ").strip()
-            if nueva_bd in bases or nueva_bd == "":
-                if nueva_bd:
-                    DB_NAME = nueva_bd
-                    print(f"   ✅ BD cambiada a: {DB_NAME}")
-            else:
-                print("   ❌ Base de datos no válida")
+        nueva_bd = input("   📝 Nueva base de datos: ").strip()
+        if nueva_bd:
+            DB_NAME = nueva_bd
+            print(f"   ✅ BD cambiada a: {DB_NAME}")
     
     return True
 
@@ -309,17 +363,13 @@ def main():
     signal.signal(signal.SIGINT, manejar_señal)
     signal.signal(signal.SIGTERM, manejar_señal)
     
-    print("🧹 LIMPIADOR DE FACTUR-X.XML")
+    print("🧹 LIMPIADOR COMPLETO DE FACTUR-X.XML")
     print("=" * 50)
-    print("⚡ SIN PASSWORD | CON VACUUM OPCIONAL")
+    print("⚡ BASE DE DATOS + FILESTORE + VACUUM OPCIONAL")
     print("=" * 50)
     
     # Diagnosticar
     if not diagnosticar_conexion():
-        print("\n💡 SOLUCIONES:")
-        print("1. sudo apt install postgresql-client")
-        print("2. sudo systemctl start postgresql")
-        print("3. Verificar usuario: sudo -u postgres psql -c '\\du'")
         return
     
     # Listar BD y permitir cambiar
@@ -339,8 +389,7 @@ def main():
     
     print(f"\n📊 RESUMEN:")
     print(f"   • BD: {DB_NAME}")
-    print(f"   • Archivos: {total_archivos:,}")
-    print(f"   • Tiempo estimado: ~{total_archivos/5000:.1f} min")
+    print(f"   • Archivos en BD: {total_archivos:,}")
     
     confirmacion = input("\n⚠️  ¿Continuar con la eliminación? (escribe 'SI'): ")
     
@@ -348,37 +397,43 @@ def main():
         print("❌ Cancelado.")
         return
     
-    # Ejecutar eliminación
+    # Ejecutar eliminación de BD
     print(f"\n🚀 INICIANDO ELIMINACIÓN...")
-    print("   Ctrl+C para interrumpir")
     print("-" * 50)
     
     inicio = time.time()
-    eliminados = eliminar_archivos_optimizado(total_archivos)
-    fin = time.time()
+    eliminados_bd = eliminar_archivos_bd_optimizado(total_archivos)
+    fin_bd = time.time()
     
-    # Mostrar espacio después de eliminar
-    if eliminados > 0:
-        print("\n📊 ESPACIO DESPUÉS DE ELIMINACIÓN:")
-        mostrar_espacio()
-        
-        # ✅ AHORA PREGUNTA ANTES DE VACUUM
-        vacuum_ejecutado = preguntar_y_ejecutar_vacuum()
-        
-        # Mostrar espacio final si se ejecutó VACUUM
-        if vacuum_ejecutado:
-            print("\n📊 ESPACIO FINAL (CON VACUUM):")
-            mostrar_espacio()
+    tiempo_bd = fin_bd - inicio
+    eliminados_filestore = 0
+    vacuum_ejecutado = False
     
-    tiempo_total = fin - inicio
+    if eliminados_bd > 0:
+        # ✅ PREGUNTA por eliminación del filestore
+        print("\n" + "=" * 50)
+        eliminar_filestore = preguntar_eliminacion_filestore()
+        
+        if eliminar_filestore:
+            eliminados_filestore = eliminar_archivos_filestore()
+        
+        # ✅ PREGUNTA por VACUUM
+        print("\n" + "=" * 50)
+        quiere_vacuum = preguntar_vacuum()
+        
+        if quiere_vacuum:
+            ejecutar_vacuum_optimizado()
+            vacuum_ejecutado = True
+    
+    tiempo_total = time.time() - inicio
     
     print(f"""
-✅ COMPLETADO
+✅ PROCESO COMPLETADO
 ────────────────────
-• BD: {DB_NAME}
-• Eliminados: {eliminados:,}
-• Tiempo: {tiempo_total/60:.1f} min
-• Velocidad: {eliminados/tiempo_total:.1f}/s
+• Base de datos: {DB_NAME}
+• Archivos BD: {eliminados_bd:,}
+• Archivos filestore: {eliminados_filestore:,}
+• Tiempo total: {tiempo_total/60:.1f} min
 • VACUUM: {'✅' if vacuum_ejecutado else '❌'}
 ────────────────────
     """)

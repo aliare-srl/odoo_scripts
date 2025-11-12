@@ -7,12 +7,13 @@ import threading
 import signal
 
 # --- 🔧 CONFIGURACIÓN SIN PASSWORD ---
-DB_NAME = "demo"                         # Nombre de tu BD Odoo
+DB_NAME = "cuadrille"                         # Nombre de tu BD Odoo
 DB_HOST = "localhost"                    # Host de la BD
 DB_PORT = "5432"                         # Puerto de PostgreSQL
 
-# Rutas comunes del filestore de Odoo
+# Rutas comunes del filestore de Odoo (CORREGIDO)
 FILESTORE_PATHS = [
+    f"/var/opt/odoo/data_dir/filestore/{DB_NAME}",  # ← RUTA PRINCIPAL CORREGIDA
     f"/var/lib/odoo/filestore/{DB_NAME}",
     f"/home/odoo/.local/share/Odoo/filestore/{DB_NAME}", 
     f"/opt/odoo/filestore/{DB_NAME}",
@@ -51,15 +52,23 @@ def encontrar_filestore():
     """Encuentra la ruta del filestore"""
     print("🔍 Buscando filestore...")
     
+    # Primero verificar la ruta específica que proporcionaste
+    ruta_especifica = f"/var/opt/odoo/data_dir/filestore/{DB_NAME}"
+    if os.path.exists(ruta_especifica):
+        print(f"   ✅ Filestore encontrado en ruta específica: {ruta_especifica}")
+        return ruta_especifica
+    
+    # Luego verificar las otras rutas comunes
     for path in FILESTORE_PATHS:
         if os.path.exists(path):
             print(f"   ✅ Filestore encontrado: {path}")
             return path
     
-    # Búsqueda recursiva
+    # Búsqueda recursiva como fallback
     try:
+        print("   🔍 Búsqueda recursiva en el sistema...")
         resultado = subprocess.run([
-            'find', '/var/lib', '/home', '/opt', '-name', 'filestore', '-type', 'd'
+            'find', '/var', '/home', '/opt', '-name', 'filestore', '-type', 'd'
         ], capture_output=True, text=True)
         
         if resultado.stdout:
@@ -68,73 +77,121 @@ def encontrar_filestore():
                 if path and DB_NAME in path:
                     print(f"   ✅ Filestore encontrado: {path}")
                     return path
-    except:
-        pass
+    except Exception as e:
+        print(f"   ⚠️  Error en búsqueda recursiva: {e}")
     
     print("   ❌ No se encontró el filestore")
     return None
 
-def obtener_rutas_archivos_filestore():
-    """Obtiene las rutas de los archivos en el filestore"""
-    filestore_path = encontrar_filestore()
-    if not filestore_path:
-        return []
+def obtener_archivos_filestore_para_eliminar():
+    """Obtiene los nombres REALES de los archivos del filestore desde la BD"""
+    print("📁 Obteniendo nombres de archivos del filestore desde la BD...")
     
-    print("📁 Obteniendo rutas de archivos en el filestore...")
-    
-    # Obtener los store_fname de la base de datos
+    # Obtener los store_fname de la BD
     archivos_db = ejecutar_sql_como_postgres("""
         SELECT store_fname FROM ir_attachment 
         WHERE name ILIKE '%factur-x.xml%' 
         AND store_fname IS NOT NULL
+        AND store_fname != ''
     """)
     
-    rutas_archivos = []
+    archivos_para_eliminar = []
     if archivos_db:
         archivos = [fname.strip() for fname in archivos_db.split('\n') if fname.strip()]
-        for archivo in archivos:
-            ruta_completa = os.path.join(filestore_path, archivo)
-            if os.path.exists(ruta_completa):
-                rutas_archivos.append(ruta_completa)
-        
-        print(f"   📦 {len(rutas_archivos)} archivos encontrados en filestore")
+        print(f"   📦 {len(archivos)} archivos encontrados en la BD para eliminar del filestore")
+        archivos_para_eliminar = archivos
     else:
-        print("   ✅ No hay referencias a archivos en el filestore")
+        print("   ✅ No hay archivos en la BD para eliminar del filestore")
     
-    return rutas_archivos
+    return archivos_para_eliminar
 
-def eliminar_archivos_filestore():
-    """Elimina los archivos físicos del filestore"""
+def eliminar_archivos_filestore(archivos_para_eliminar):
+    """Elimina los archivos físicos del filestore usando los nombres REALES de la BD"""
     print("🗑️  Eliminando archivos del filestore...")
     
-    rutas_archivos = obtener_rutas_archivos_filestore()
-    if not rutas_archivos:
+    filestore_path = encontrar_filestore()
+    if not filestore_path:
+        print("   ❌ No se pudo encontrar el filestore")
+        return 0
+    
+    if not archivos_para_eliminar:
         print("   ✅ No hay archivos para eliminar del filestore")
         return 0
     
     eliminados = 0
-    for i, ruta_archivo in enumerate(rutas_archivos, 1):
+    errores = 0
+    no_encontrados = 0
+    
+    for i, nombre_archivo in enumerate(archivos_para_eliminar, 1):
         try:
-            os.remove(ruta_archivo)
-            eliminados += 1
+            # Construir la ruta completa
+            ruta_completa = os.path.join(filestore_path, nombre_archivo)
+            
+            # Verificar si el archivo existe antes de eliminar
+            if os.path.exists(ruta_completa):
+                os.remove(ruta_completa)
+                eliminados += 1
+            else:
+                # Verificar si existe en subdirectorios
+                nombre_base = os.path.basename(nombre_archivo)
+                encontrado = False
+                
+                # Buscar recursivamente el archivo
+                for root, dirs, files in os.walk(filestore_path):
+                    if nombre_base in files:
+                        ruta_encontrada = os.path.join(root, nombre_base)
+                        os.remove(ruta_encontrada)
+                        eliminados += 1
+                        encontrado = True
+                        break
+                
+                if not encontrado:
+                    no_encontrados += 1
+                    if no_encontrados <= 5:  # Mostrar solo los primeros 5 no encontrados
+                        print(f"   ⚠️  Archivo no encontrado: {nombre_archivo}")
+            
+            # Mostrar progreso cada 100 archivos
             if i % 100 == 0:
-                print(f"   🔄 {i}/{len(rutas_archivos)} archivos eliminados...")
+                print(f"   🔄 {i}/{len(archivos_para_eliminar)} archivos procesados... ({eliminados} eliminados, {errores} errores, {no_encontrados} no encontrados)")
+                
         except Exception as e:
-            print(f"   ❌ Error eliminando {ruta_archivo}: {e}")
+            print(f"   ❌ Error eliminando {nombre_archivo}: {e}")
+            errores += 1
     
     print(f"   ✅ {eliminados} archivos eliminados del filestore")
+    if errores > 0:
+        print(f"   ⚠️  {errores} archivos con errores")
+    if no_encontrados > 0:
+        print(f"   ℹ️  {no_encontrados} archivos no encontrados (pueden haber sido eliminados previamente)")
+    
     return eliminados
 
-def preguntar_eliminacion_filestore():
+def preguntar_eliminacion_filestore(archivos_para_eliminar):
     """Pregunta si eliminar archivos del filestore"""
     print(f"\n📁 ELIMINACIÓN DEL FILESTORE")
     print("=" * 50)
-    print("¿Deseas eliminar también los archivos físicos del filestore?")
-    print()
-    print("📍 Los archivos se encuentran en:")
+    
+    if not archivos_para_eliminar:
+        print("   ✅ No hay archivos para eliminar del filestore")
+        return False
+    
     filestore_path = encontrar_filestore()
     if filestore_path:
+        print("📍 Los archivos se encuentran en:")
         print(f"   {filestore_path}")
+        print(f"   📊 {len(archivos_para_eliminar)} archivos por eliminar")
+        
+        # Mostrar algunos ejemplos de nombres de archivos
+        print("   📝 Ejemplos de archivos:")
+        for archivo in archivos_para_eliminar[:5]:
+            print(f"      • {archivo}")
+        if len(archivos_para_eliminar) > 5:
+            print(f"      • ... y {len(archivos_para_eliminar) - 5} más")
+    
+    print()
+    print("💡 ORDEN DE ELIMINACIÓN:")
+    print("   1. Primero se eliminan los archivos del filestore")
+    print("   2. Luego se eliminan los registros de la base de datos")
     print()
     print("✅ RECOMENDADO: Libera espacio en disco")
     print("❌ PELIGROSO: No se puede deshacer")
@@ -365,7 +422,7 @@ def main():
     
     print("🧹 LIMPIADOR COMPLETO DE FACTUR-X.XML")
     print("=" * 50)
-    print("⚡ BASE DE DATOS + FILESTORE + VACUUM OPCIONAL")
+    print("⚡ ORDEN CORRECTO: FILESTORE → BASE DE DATOS → VACUUM")
     print("=" * 50)
     
     # Diagnosticar
@@ -397,27 +454,35 @@ def main():
         print("❌ Cancelado.")
         return
     
-    # Ejecutar eliminación de BD
+    # Ejecutar eliminación en el ORDEN CORRECTO
     print(f"\n🚀 INICIANDO ELIMINACIÓN...")
     print("-" * 50)
     
     inicio = time.time()
-    eliminados_bd = eliminar_archivos_bd_optimizado(total_archivos)
-    fin_bd = time.time()
-    
-    tiempo_bd = fin_bd - inicio
     eliminados_filestore = 0
+    eliminados_bd = 0
     vacuum_ejecutado = False
     
-    if eliminados_bd > 0:
-        # ✅ PREGUNTA por eliminación del filestore
+    # 1. PRIMERO: Obtener nombres de archivos del filestore
+    archivos_filestore = obtener_archivos_filestore_para_eliminar()
+    
+    # 2. PREGUNTAR por eliminación del filestore
+    if archivos_filestore:
         print("\n" + "=" * 50)
-        eliminar_filestore = preguntar_eliminacion_filestore()
+        eliminar_filestore = preguntar_eliminacion_filestore(archivos_filestore)
         
         if eliminar_filestore:
-            eliminados_filestore = eliminar_archivos_filestore()
-        
-        # ✅ PREGUNTA por VACUUM
+            eliminados_filestore = eliminar_archivos_filestore(archivos_filestore)
+    
+    # 3. LUEGO: Eliminar registros de la base de datos
+    print("\n" + "=" * 50)
+    print("🗃️  ELIMINACIÓN DE REGISTROS DE LA BASE DE DATOS")
+    print("-" * 50)
+    
+    eliminados_bd = eliminar_archivos_bd_optimizado(total_archivos)
+    
+    # 4. FINALMENTE: PREGUNTAR por VACUUM
+    if eliminados_bd > 0:
         print("\n" + "=" * 50)
         quiere_vacuum = preguntar_vacuum()
         
@@ -431,10 +496,15 @@ def main():
 ✅ PROCESO COMPLETADO
 ────────────────────
 • Base de datos: {DB_NAME}
-• Archivos BD: {eliminados_bd:,}
 • Archivos filestore: {eliminados_filestore:,}
+• Registros BD: {eliminados_bd:,}
 • Tiempo total: {tiempo_total/60:.1f} min
 • VACUUM: {'✅' if vacuum_ejecutado else '❌'}
+────────────────────
+💡 ORDEN EJECUTADO:
+   1. 📁 Eliminación del filestore
+   2. 🗃️  Eliminación de registros BD  
+   3. 🧹 VACUUM (opcional)
 ────────────────────
     """)
 

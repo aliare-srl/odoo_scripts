@@ -9,24 +9,22 @@
 # Variables de entorno para el purgado de mail_message
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
+
+### IMPORTANTE: Agrega al path la ruta al directorio del script
+#               para simplificar el cron.
+#               Notar que no tiene / al final.
+SCRIPT_PATH=/home/admin/odoo_script/purge_mail_messages
+
 BD_A_PURGAR=full24
 # FECHA_CORTE=2025-03-01
 # BATCH_SIZE=50000
 # LOCK_TIMEOUT=60s
 
 # 1. Configura PostgreSQL para el borrado (2:58 AM)
-58 2 * * * psql -d "$BD_A_PURGAR" <<'SQL' 2>&1 | logger -t PURGAR_MAIL_MESSAGE
-ALTER SYSTEM SET wal_compression = on;
-SELECT pg_reload_conf();
-ALTER TABLE mail_message SET (autovacuum_enabled = false);
-SQL
+58 2 * * * bash ${SCRIPT_PATH}/setup.sh 2>&1 | logger -t PURGAR_MAIL_MESSAGE
 
 # 2. Ejecuta purga cada 5 min entre 3:00-5:55 AM
-*/5 3-5 * * * /usr/bin/flock -n /tmp/purgar_mail_message.flock /usr/bin/time /home/admin/odoo_script/purgar_mail_message/purgar_mail_message.sh 2>&1 | logger -t PURGAR_MAIL_MESSAGE
+*/5 3-5 * * * /usr/bin/flock -n /tmp/purgar_mail_message.flock /usr/bin/time ${SCRIPT_PATH}/purgar_mail_message.sh 2>&1 | logger -t PURGAR_MAIL_MESSAGE
 
 # 3. Restaura configuración (6:02 AM)
-2 6 * * * psql -d "$BD_A_PURGAR" <<'SQL' 2>&1 | logger -t PURGAR_MAIL_MESSAGE
-ALTER TABLE mail_message RESET (autovacuum_enabled);
-ALTER SYSTEM RESET wal_compression;
-SELECT pg_reload_conf();
-SQL
+2 6 * * * bash ${SCRIPT_PATH}/reset.sh  2>&1 | logger -t PURGAR_MAIL_MESSAGE

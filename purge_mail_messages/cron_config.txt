@@ -1,30 +1,20 @@
-# Configuración del Crontab para Purga de mail_message
-# 
-# IMPORTANTE: 
-# - Editar el crontab del usuario postgres: sudo crontab -eu postgres
-# - AJUSTAR la ruta del script según donde clonaste el repositorio
-#   (usualmente /home/odoo/odoo_scripts/purgar_mail_message/purgar_mail_message.sh)
-
 # Crontab usuario postgres
-# Variables de entorno para el purgado de mail_message
-SHELL=/bin/bash
-PATH=/usr/local/bin:/usr/bin:/bin
+# Editar con: sudo crontab -eu postgres
+# IMPORTANTE: Ajustar la ruta absoluta al directorio de scripts y programas.
 
-### IMPORTANTE: Agrega al path la ruta al directorio del script
-#               para simplificar el cron.
-#               Notar que no tiene / al final.
-SCRIPT_PATH=/home/admin/odoo_script/purge_mail_messages
-
+# Obligatorio establecer BD_A_PURGAR
 BD_A_PURGAR=full24
-# FECHA_CORTE=2025-03-01
+# Opcionales, con sus valores predeterminados
+# FECHA_CORTE=2025-07-01
 # BATCH_SIZE=50000
 # LOCK_TIMEOUT=60s
 
 # 1. Configura PostgreSQL para el borrado (2:58 AM)
-58 2 * * * bash ${SCRIPT_PATH}/setup.sh 2>&1 | logger -t PURGAR_MAIL_MESSAGE
+58 2 * * * /home/admin/odoo_script/purge_mail_messages/setup.sh 2>&1 | logger -t PURGAR_MAIL_MESSAGE
 
 # 2. Ejecuta purga cada 5 min entre 3:00-5:55 AM
-*/5 3-5 * * * /usr/bin/flock -n /tmp/purgar_mail_message.flock /usr/bin/time ${SCRIPT_PATH}/purgar_mail_message.sh 2>&1 | logger -t PURGAR_MAIL_MESSAGE
+*/5 3-5 * * * /usr/bin/flock -n /tmp/purgar_mail_message.flock /usr/bin/time /home/admin/odoo_script/purge_mail_messages/purgar_mail_message.sh 2>&1 | logger -t PURGAR_MAIL_MESSAGE
 
 # 3. Restaura configuración (6:02 AM)
-2 6 * * * bash ${SCRIPT_PATH}/reset.sh  2>&1 | logger -t PURGAR_MAIL_MESSAGE
+2 6 * * * /home/admin/odoo_script/purge_mail_messages/reset.sh 2>&1 | logger -t PURGAR_MAIL_MESSAGE
+

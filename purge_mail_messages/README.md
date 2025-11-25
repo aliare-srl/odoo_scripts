@@ -8,20 +8,30 @@ Script para borrar registros de tipo notification de la tabla `mail_message` ant
 - Permisos de ejecución en el script
 - Rutas absolutas en la configuración del cron
 
-## Instalación
+## Implementación.
 
-Suponiendo que el script esté en `/home/odoo/odoo_scripts/purge_mail_message`:
+Suponiendo que el script esté en `/home/admin/odoo_scripts/purge_mail_message`:
 
 1. Verificar que el usuario `postgres` pueda ejecutar el script:
 ```bash
-cd /home/odoo/odoo_scripts/purge_mail_message
+cd /home/admin/odoo_scripts/purge_mail_message
 sudo -u postgres ./mail_message_purge.sh
 # Debe fallar con: "ERROR: Debe especificar variable BD_A_PURGAR"
 ```
 
-**NOTA**: En adelante se asume que estás en el directorio del script (`pwd` → `/home/odoo/odoo_scripts/purge_mail_message`).
+**NOTA**: En adelante se asume que estás en el directorio del script (`pwd` -> `/home/admin/odoo_scripts/purge_mail_message`).
 
-## Configuración del Cron
+### Ejecución Manual.
+
+Para probar el script con variables definidas en línea:
+
+```bash
+BD_A_PURGAR=nombre_bd FECHA_CORTE="2024-11-01" BATCH_SIZE=10000 sudo -u postgres ./mail_message_purge.sh
+```
+
+Sólo es obligatoria BD_A_PURGAR, las demás son opcionales y se pueden ver sus valores predeterminados en los mismos scripts.
+
+## Configuración del Cron.
 
 1. Ver la configuración de ejemplo:
 ```bash
@@ -37,7 +47,7 @@ sudo crontab -eu postgres
 
 ## Funcionamiento
 
-### Horarios de Ejecución
+### Horarios de Ejecución Sugeridos.
 
 - **2:58 AM**: Setup - Configura PostgreSQL para optimizar el borrado
 - **3:00-5:55 AM**: Purga - Ejecuta cada 5 minutos borrando lotes de registros

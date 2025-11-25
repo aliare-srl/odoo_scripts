@@ -2,11 +2,15 @@
 
 Script para borrar registros de tipo notification de la tabla `mail_message` anteriores a una fecha de corte (sin incluirla).
 
+
 ## Requisitos
 
 - Ejecutarse en el **crontab del usuario `postgres`**
 - Permisos de ejecución en el script
 - Rutas absolutas en la configuración del cron
+- Programas flock, time, logger y psql: En general siempre están accesibles para todos
+  los usuario y psql en particular para el usuario postgres.
+
 
 ## Implementación.
 
@@ -21,6 +25,7 @@ sudo -u postgres ./mail_message_purge.sh
 
 **NOTA**: En adelante se asume que estás en el directorio del script (`pwd` -> `/home/admin/odoo_scripts/purge_mail_message`).
 
+
 ### Ejecución Manual.
 
 Para probar el script con variables definidas en línea:
@@ -31,21 +36,28 @@ BD_A_PURGAR=nombre_bd FECHA_CORTE="2024-11-01" BATCH_SIZE=10000 sudo -u postgres
 
 Sólo es obligatoria BD_A_PURGAR, las demás son opcionales y se pueden ver sus valores predeterminados en los mismos scripts.
 
+
 ## Configuración del Cron.
 
 1. Ver la configuración de ejemplo:
 ```bash
 cat cron_config.txt
 ```
+Este ejemplo habrá que ajustar la rutas a los ejecutables de ser necesario. 
 
 2. Editar crontab del usuario postgres:
 ```bash
 sudo crontab -eu postgres
 ```
 
-3. Copiar o tipear la configuración, **ajustando la ruta absoluta del script** si está en otra ubicación.
+3. Copiar o tipear la configuración, **ajustando la ruta absoluta de lis scripts y utilitarios** si está en otra ubicación.
+
 
 ## Funcionamiento
+
+- script principal: mail_message_purge.sh
+- scripts auxiliares: setup.sh y reset.sh
+- Ejemplo de configuración en cron: cron_config.txt
 
 ### Horarios de Ejecución Sugeridos.
 
@@ -67,7 +79,7 @@ sudo crontab -eu postgres
 journalctl -t PURGAR_MAIL_MESSAGE
 ```
 
-### Ver logs en tiempo real(-f muestra a medida que hay nuevos losg, se sale con CTRL+c)
+### Ver logs en tiempo real(-f muestra a medida que hay nuevos logs, se sale con CTRL+c)
 ```bash
 journalctl -f -t PURGAR_MAIL_MESSAGE
 ```

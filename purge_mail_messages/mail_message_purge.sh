@@ -18,6 +18,7 @@ WITH lote AS (
     SELECT id
     FROM mail_message
     WHERE create_date < '$FECHA_CORTE'
+    AND message_type = 'notification'
     ORDER BY id
     LIMIT $BATCH_SIZE
 ),

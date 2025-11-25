@@ -1,6 +1,6 @@
 # Purga de mail_message en Odoo
 
-Script para borrar registros de tipo notification de la tabla `mail_message` anteriores a una fecha de corte (sin incluirla).
+Script para borrar registros de tipo notification de la tabla `mail_message` de tipo 'notificaion' anteriores a una fecha de corte (sin incluirla).
 
 
 ## Requisitos

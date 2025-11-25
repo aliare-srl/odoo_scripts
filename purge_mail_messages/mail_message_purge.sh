@@ -9,11 +9,11 @@ FECHA_CORTE="${FECHA_CORTE:-2025-07-01}"
 BATCH_SIZE="${BATCH_SIZE:-50000}"
 # LOCK_TIMEOUT: Tiempo a esperar si hay algún bloqueo
 # que impida el delete. 60s es un valor prudencial
-LOCK_TIMEOUT="${LOCK_TIMEOUT:-60s"
+LOCK_TIMEOUT="${LOCK_TIMEOUT:-60s}"
 
-psql -d "$BD_A_PURGAR" -t -A <<SQL
+/usr/bin/psql -d "$BD_A_PURGAR" -t -A <<SQL
 SET statement_timeout = 0;
-set lock_timeout = ${LOCK_TIMEOUT}
+SET lock_timeout = '${LOCK_TIMEOUT}';
 WITH lote AS (
     SELECT id
     FROM mail_message

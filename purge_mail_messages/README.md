@@ -1,6 +1,6 @@
 # Purga de mail_message en Odoo
 
-Script para borrar registros de tipo notification de la tabla `mail_message` de tipo 'notificaion' anteriores a una fecha de corte (sin incluirla).
+Script para borrar registros de tipo *notification* de la tabla `mail_message` anteriores a una fecha de corte (sin incluirla).
 
 
 ## Requisitos
@@ -23,7 +23,7 @@ sudo -u postgres ./mail_message_purge.sh
 # Debe fallar con: "ERROR: Debe especificar variable BD_A_PURGAR"
 ```
 
-**NOTA**: En adelante se asume que estás en el directorio del script (`pwd` -> `/home/admin/odoo_scripts/purge_mail_message`).
+**NOTA**: En adelante se asume que se está en el directorio del script (`pwd` -> `/home/admin/odoo_scripts/purge_mail_message`).
 
 
 ### Ejecución Manual.
@@ -43,21 +43,21 @@ Sólo es obligatoria BD_A_PURGAR, las demás son opcionales y se pueden ver sus 
 ```bash
 cat cron_config.txt
 ```
-Este ejemplo habrá que ajustar la rutas a los ejecutables de ser necesario. 
+En este ejemplo habrá que ajustar la rutas a los ejecutables de ser necesario. 
 
 2. Editar crontab del usuario postgres:
 ```bash
 sudo crontab -eu postgres
 ```
 
-3. Copiar o tipear la configuración, **ajustando la ruta absoluta de lis scripts y utilitarios** si está en otra ubicación.
+3. Copiar o tipear la configuración, **ajustando la ruta absoluta de los scripts y utilitarios** si están en otra ubicación.
 
 
 ## Funcionamiento
 
-- script principal: mail_message_purge.sh
-- scripts auxiliares: setup.sh y reset.sh
-- Ejemplo de configuración en cron: cron_config.txt
+- script principal: `mail_message_purge.sh`
+- scripts auxiliares: `setup.sh` y `reset.sh`
+- Ejemplo de configuración en cron: *cron_config.txt*
 
 ### Horarios de Ejecución Sugeridos.
 

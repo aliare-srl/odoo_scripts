@@ -25,7 +25,7 @@ while true; do
   echo "Bucle: $contador_bucles"
 
   # '|| true' asegura que el bucle continúe aunque haya un lock timeout.
-  SALIDA=$( { time -p BD_A_PURGAR="$BD_A_PURGAR" BATCH_SIZE="BATCH_SIZE" ${SCRIPT_PATH}/mail_message_purge.sh 2>&1; } 2>&1 || true)
+  SALIDA=$( { time -p BD_A_PURGAR="$BD_A_PURGAR" BATCH_SIZE="$BATCH_SIZE" ${SCRIPT_PATH}/mail_message_purge.sh 2>&1; } 2>&1 || true)
 
   echo "Salida del llamado: ${SALIDA}"
 

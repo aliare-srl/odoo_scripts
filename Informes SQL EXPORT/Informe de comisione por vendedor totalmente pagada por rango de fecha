@@ -1,0 +1,30 @@
+SELECT 
+    rp.name AS vendedor,
+    COUNT(m.id) AS cantidad_facturas,
+    ROUND(SUM(m.amount_total), 2) AS total_facturado,
+    ROUND(SUM(m.amount_total * (%(x_comision)s / 100.0)), 2) AS comision
+FROM account_move m
+JOIN res_users u ON u.id = m.invoice_user_id
+JOIN res_partner rp ON rp.id = u.partner_id
+JOIN res_company c ON c.id = m.company_id
+JOIN (
+    SELECT 
+        aml.move_id,
+        MAX(apr.create_date) AS fecha_cobro
+    FROM account_move_line aml
+    JOIN account_account aa ON aa.id = aml.account_id
+    JOIN account_partial_reconcile apr ON apr.debit_move_id = aml.id OR apr.credit_move_id = aml.id
+    WHERE aa.internal_type = 'receivable'
+    GROUP BY aml.move_id
+) pagos ON pagos.move_id = m.id
+WHERE m.move_type = 'out_invoice'
+  AND m.state = 'posted'
+  AND m.amount_residual = 0
+  AND pagos.fecha_cobro >= %(x_fecha_desde)s
+  AND pagos.fecha_cobro < %(x_fecha_hasta)s::date + interval '1 day'
+  AND (
+      CAST(%(x_empresa)s AS text) IN ('False', 'false', '', 'None')
+      OR c.name ILIKE '%%' || CAST(%(x_empresa)s AS text) || '%%'
+  )
+GROUP BY rp.name
+ORDER BY rp.name

@@ -1,7 +1,7 @@
 """
-Script BULK Optimizado - SOLO INSERCIÓN DE NUEVOS
-- Solo agrega productos que NO existen (por código de barras)
-- NO actualiza productos existentes
+Script BULK Optimizado - INSERCIÓN Y ACTUALIZACIÓN DE PRECIOS
+- Inserta productos que NO existen (por código de barras)
+- NUEVA: Opción de actualizar precios de productos existentes
 - Barra de progreso y estimación de tiempo
 - Impuestos cliente/proveedor
 - purchase_method
@@ -27,6 +27,11 @@ password = "admin"
 
 csv_path = "articulos.csv"
 log_path = "import_log_articulos.txt"
+
+# ✨ NUEVA CONFIGURACIÓN - ACTUALIZACIÓN DE PRECIOS
+UPDATE_PRICES = True  # True = actualizar precios de productos existentes | False = solo insertar nuevos
+UPDATE_COST = True    # True = actualizar costo (standard_price) | False = no actualizar costo
+UPDATE_SALE_PRICE = True  # True = actualizar precio de venta (list_price) | False = no actualizar precio venta
 
 logging.basicConfig(filename=log_path, level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -75,7 +80,7 @@ all_products = models.execute_kw(
     db, uid, password,
     'product.template', 'search_read',
     [[['barcode', '!=', False]]], 
-    {'fields': ['id', 'barcode', 'name']}
+    {'fields': ['id', 'barcode', 'name', 'list_price', 'standard_price']}
 )
 products_by_barcode = {p['barcode']: p for p in all_products if p.get('barcode')}
 print(f"✓ Cargados {len(products_by_barcode)} productos con código de barras")
@@ -229,11 +234,15 @@ partners_cache = {}
 
 # ---------- LEER CSV ----------
 new_products = []
+update_products = []  # ✨ NUEVA: Lista de productos a actualizar
 skipped_products = []
 csv_rows = []
 seen_barcodes = set()
 
 print("\nProcesando archivo CSV...")
+print(f"Configuración: UPDATE_PRICES={UPDATE_PRICES}, UPDATE_COST={UPDATE_COST}, UPDATE_SALE_PRICE={UPDATE_SALE_PRICE}")
+print("-" * 60)
+
 with open(csv_path, newline='', encoding='utf-8') as csvfile:
     reader = list(csv.DictReader(csvfile))
     total_rows = len(reader)
@@ -263,21 +272,63 @@ with open(csv_path, newline='', encoding='utf-8') as csvfile:
             logging.info(f"Fila {idx}: OMITIDO - Código de barras duplicado en CSV: {barcode}")
             continue
 
-        # ✅ VALIDACIÓN 3: Ya existe en Odoo
-        if barcode in products_by_barcode:
-            skipped_products.append({
-                'fila': idx,
-                'nombre': row.get('name', 'SIN NOMBRE'),
-                'razon': f'Ya existe en Odoo (barcode: {barcode})',
-                'producto_odoo': products_by_barcode[barcode]['name']
-            })
-            logging.info(f"Fila {idx}: OMITIDO - Producto ya existe: {products_by_barcode[barcode]['name']}")
-            continue
-
         # ✅ Marcar como visto
         seen_barcodes.add(barcode)
 
-        # ✅ Construir valores para el nuevo producto
+        # ✨ NUEVA LÓGICA: Verificar si existe para actualizar o crear
+        existing_product = products_by_barcode.get(barcode)
+        
+        if existing_product and UPDATE_PRICES:
+            # ✨ ACTUALIZACIÓN DE PRECIOS
+            update_vals = {
+                'id': existing_product['id'],
+                'barcode': barcode,
+                'name': existing_product['name'],
+            }
+            
+            # Actualizar costo si está habilitado
+            if UPDATE_COST and has_value(row.get('standard_price')):
+                new_cost = float(row['standard_price'])
+                old_cost = existing_product.get('standard_price', 0.0)
+                if new_cost != old_cost:
+                    update_vals['standard_price'] = new_cost
+                    update_vals['cost_changed'] = True
+                    update_vals['old_cost'] = old_cost
+            
+            # Actualizar precio de venta si está habilitado
+            if UPDATE_SALE_PRICE and has_value(row.get('list_price')):
+                new_price = float(row['list_price'])
+                old_price = existing_product.get('list_price', 0.0)
+                if new_price != old_price:
+                    update_vals['list_price'] = new_price
+                    update_vals['price_changed'] = True
+                    update_vals['old_price'] = old_price
+            
+            # Solo agregar si hay algo que actualizar
+            if 'standard_price' in update_vals or 'list_price' in update_vals:
+                update_products.append(update_vals)
+                logging.info(f"Fila {idx}: ACTUALIZAR precios - {existing_product['name']}")
+            else:
+                skipped_products.append({
+                    'fila': idx,
+                    'nombre': row.get('name', 'SIN NOMBRE'),
+                    'razon': 'Ya existe y precios son iguales',
+                    'producto_odoo': existing_product['name']
+                })
+            continue
+        
+        elif existing_product and not UPDATE_PRICES:
+            # Ya existe pero NO se actualizan precios
+            skipped_products.append({
+                'fila': idx,
+                'nombre': row.get('name', 'SIN NOMBRE'),
+                'razon': f'Ya existe en Odoo (UPDATE_PRICES=False)',
+                'producto_odoo': existing_product['name']
+            })
+            logging.info(f"Fila {idx}: OMITIDO - Producto ya existe (sin actualización): {existing_product['name']}")
+            continue
+
+        # ✅ PRODUCTO NUEVO - Construir valores
         vals = {
             'name': sanitize_xml(row.get('name') or 'SIN NOMBRE'),
             'default_code': sanitize_xml(row.get('default_code')) or False,
@@ -345,7 +396,15 @@ print(f"RESUMEN DE PROCESAMIENTO:")
 print(f"{'='*60}")
 print(f"Total de filas en CSV:           {total_rows}")
 print(f"Productos NUEVOS a crear:        {len(new_products)}")
+print(f"Productos a ACTUALIZAR:          {len(update_products)}")  # ✨ NUEVO
 print(f"Productos OMITIDOS:              {len(skipped_products)}")
+
+# Estadísticas de actualización
+if update_products:
+    cost_updates = sum(1 for p in update_products if 'cost_changed' in p)
+    price_updates = sum(1 for p in update_products if 'price_changed' in p)
+    print(f"  → Actualizaciones de costo:    {cost_updates}")
+    print(f"  → Actualizaciones de precio:   {price_updates}")
 
 # Estadísticas de impuestos
 products_with_tax = sum(1 for p in new_products if 'taxes_id' in p)
@@ -367,41 +426,104 @@ if skipped_products:
         print(f"\n... y {len(skipped_products) - 20} productos más omitidos (ver log completo)")
     print(f"{'-'*60}")
 
+# ✨ NUEVA: Detalles de actualizaciones
+if update_products and len(update_products) <= 50:
+    print(f"\n💰 DETALLES DE ACTUALIZACIONES DE PRECIOS:")
+    print(f"{'-'*60}")
+    for item in update_products[:20]:
+        changes = []
+        if 'cost_changed' in item:
+            changes.append(f"Costo: ${item['old_cost']:.2f} → ${item['standard_price']:.2f}")
+        if 'price_changed' in item:
+            changes.append(f"Venta: ${item['old_price']:.2f} → ${item['list_price']:.2f}")
+        print(f"{item['name'][:40]:40s} - {' | '.join(changes)}")
+    
+    if len(update_products) > 20:
+        print(f"\n... y {len(update_products) - 20} actualizaciones más")
+    print(f"{'-'*60}")
+
 # Confirmar antes de continuar
-if new_products:
-    print(f"\n⚠️  Se van a crear {len(new_products)} productos nuevos en Odoo")
-    response = input("¿Desea continuar? (s/n): ")
+total_operations = len(new_products) + len(update_products)
+if total_operations > 0:
+    print(f"\n⚠️  OPERACIONES A REALIZAR:")
+    if new_products:
+        print(f"   → Crear {len(new_products)} productos nuevos")
+    if update_products:
+        print(f"   → Actualizar precios de {len(update_products)} productos existentes")
+    
+    response = input("\n¿Desea continuar? (s/n): ")
     if response.lower() != 's':
         print("❌ Operación cancelada por el usuario")
         sys.exit(0)
 else:
-    print("\n✓ No hay productos nuevos para crear. Todos los productos con código de barras ya existen.")
+    print("\n✓ No hay operaciones pendientes.")
     sys.exit(0)
 
 
+# ---------- ACTUALIZACIÓN DE PRECIOS ----------
+updated_count = 0
+update_errors = []
+
+if update_products:
+    print(f"\n{'='*60}")
+    print(f"ACTUALIZANDO PRECIOS DE {len(update_products)} PRODUCTOS...")
+    print(f"{'='*60}")
+    update_start_time = time.time()
+    
+    for i in range(0, len(update_products), 50):
+        batch = update_products[i:i+50]
+        try:
+            for product in batch:
+                update_vals = {}
+                if 'standard_price' in product:
+                    update_vals['standard_price'] = product['standard_price']
+                if 'list_price' in product:
+                    update_vals['list_price'] = product['list_price']
+                
+                if update_vals:
+                    models.execute_kw(
+                        db, uid, password,
+                        'product.template', 'write',
+                        [[product['id']], update_vals]
+                    )
+                    updated_count += 1
+            
+            print_progress(min(i+50, len(update_products)), len(update_products), 
+                         update_start_time, prefix="Actualizando precios")
+        except Exception as e:
+            error_msg = f"Error actualizando lote {i}-{i+50}: {str(e)}"
+            update_errors.append(error_msg)
+            logging.error(error_msg)
+            print(f"\n❌ {error_msg}")
+    
+    print(f"\n✓ Actualizados {updated_count} productos exitosamente")
+
+
 # ---------- CREACIÓN ----------
-print(f"\n{'='*60}")
-print(f"CREANDO {len(new_products)} PRODUCTOS NUEVOS...")
-print(f"{'='*60}")
-create_start_time = time.time()
 created_ids = []
-errors = []
+create_errors = []
 
-for i in range(0, len(new_products), 50):
-    batch = new_products[i:i+50]
-    try:
-        batch_ids = models.execute_kw(db, uid, password, 'product.template', 'create', [batch])
-        if isinstance(batch_ids, int):
-            batch_ids = [batch_ids]
-        created_ids.extend(batch_ids)
-        print_progress(min(i+50, len(new_products)), len(new_products), create_start_time, prefix="Creación productos")
-    except Exception as e:
-        error_msg = f"Error en lote {i}-{i+50}: {str(e)}"
-        errors.append(error_msg)
-        logging.error(error_msg)
-        print(f"\n❌ {error_msg}")
+if new_products:
+    print(f"\n{'='*60}")
+    print(f"CREANDO {len(new_products)} PRODUCTOS NUEVOS...")
+    print(f"{'='*60}")
+    create_start_time = time.time()
+    
+    for i in range(0, len(new_products), 50):
+        batch = new_products[i:i+50]
+        try:
+            batch_ids = models.execute_kw(db, uid, password, 'product.template', 'create', [batch])
+            if isinstance(batch_ids, int):
+                batch_ids = [batch_ids]
+            created_ids.extend(batch_ids)
+            print_progress(min(i+50, len(new_products)), len(new_products), create_start_time, prefix="Creación productos")
+        except Exception as e:
+            error_msg = f"Error en lote {i}-{i+50}: {str(e)}"
+            create_errors.append(error_msg)
+            logging.error(error_msg)
+            print(f"\n❌ {error_msg}")
 
-print(f"\n✓ Creados {len(created_ids)} productos exitosamente")
+    print(f"\n✓ Creados {len(created_ids)} productos exitosamente")
 
 
 # ---------- ASIGNAR PROVEEDORES OPTIMIZADO EN LOTES ----------
@@ -478,28 +600,31 @@ if created_ids:
                 print_progress(i+len(batch), len(supplierinfo_to_create), supplier_start, prefix="Proveedores")
             except Exception as e:
                 error_msg = f"Error asignando proveedores en lote {i}-{i+batch_size}: {str(e)}"
-                errors.append(error_msg)
+                create_errors.append(error_msg)
                 logging.error(error_msg)
 
 
 # ---------- RESUMEN FINAL ----------
 elapsed = time.time() - start_time
+all_errors = update_errors + create_errors
+
 print(f"\n{'='*60}")
 print(f"IMPORTACIÓN FINALIZADA")
 print(f"{'='*60}")
 print(f"Tiempo total:                    {elapsed:.2f} segundos")
 print(f"Productos creados:               {len(created_ids)}")
+print(f"Productos actualizados:          {updated_count}")  # ✨ NUEVO
 print(f"Productos omitidos:              {len(skipped_products)}")
-print(f"Errores:                         {len(errors)}")
+print(f"Errores:                         {len(all_errors)}")
 print(f"{'='*60}")
 
-if errors:
+if all_errors:
     print("\n❌ ERRORES DETECTADOS:")
-    for error in errors[:10]:
+    for error in all_errors[:10]:
         print(f"  - {error}")
-    if len(errors) > 10:
-        print(f"  ... y {len(errors) - 10} errores más (ver log)")
+    if len(all_errors) > 10:
+        print(f"  ... y {len(all_errors) - 10} errores más (ver log)")
 
 logging.info(f"Importación finalizada en {elapsed:.2f} segundos")
-logging.info(f"Productos creados: {len(created_ids)}, Omitidos: {len(skipped_products)}, Errores: {len(errors)}")
+logging.info(f"Productos creados: {len(created_ids)}, Actualizados: {updated_count}, Omitidos: {len(skipped_products)}, Errores: {len(all_errors)}")
 print(f"\n✓ Revisa el archivo '{log_path}' para más detalles")
